@@ -1,6 +1,6 @@
 project(luamud)
 
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.1)
 
 add_custom_command(
     OUTPUT ${PROJECT_BINARY_DIR}/luamud.sqlite
