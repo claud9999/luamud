@@ -6,6 +6,8 @@
 #include <stdlib.h> /* malloc/free */
 #include <string.h> /* memset */
 
+#define DEBUG
+
 #define MUD_MARKER 0xBEADDEEF
 
 typedef struct {
@@ -21,18 +23,10 @@ static void dumpstack (lua_State *L, const char *pfx) {
   for (int i=1; i <= top; i++) {
     printf("%s%d\t%s\t", pfx, i, luaL_typename(L,i));
     switch (lua_type(L, i)) {
-      case LUA_TNUMBER:
-        printf("%g\n",lua_tonumber(L,i));
-        break;
-      case LUA_TSTRING:
-        printf("%s\n",lua_tostring(L,i));
-        break;
-      case LUA_TBOOLEAN:
-        printf("%s\n", (lua_toboolean(L, i) ? "true" : "false"));
-        break;
-      case LUA_TNIL:
-        printf("%s\n", "nil");
-        break;
+      case LUA_TNUMBER: printf("%g\n",lua_tonumber(L,i)); break;
+      case LUA_TSTRING: printf("%s\n",lua_tostring(L,i)); break;
+      case LUA_TBOOLEAN: printf("%s\n", (lua_toboolean(L, i) ? "true" : "false")); break;
+      case LUA_TNIL: printf("%s\n", "nil"); break;
       case LUA_TTABLE:
         lua_pushnil(L);
         while(lua_next(L, i) != 0) {
@@ -56,6 +50,35 @@ int mud_err(lua_State *lua_state, const char *msg) {
     lua_pushstring(lua_state, msg);
     lua_error(lua_state);
     return 1;
+}
+
+typedef struct {
+    uint8_t *buf;
+    size_t pos, sz;
+} mud_prop_fnbuf_t;
+
+int mud_prop_fnwriter(lua_State *lua_state, const void *p, size_t sz, void *ud) {
+    mud_prop_fnbuf_t *b = ud;
+    printf("b->pos = %lu, b->sz = %lu, sz = %lu\n", b->pos, b->sz, sz);
+    while(sz + b->pos >= b->sz) {
+        size_t newsz = b->sz * 2; // double each time
+        printf("realloc %lu\n", newsz);
+        b->buf = realloc(b->buf, newsz);
+        if (!b->buf) {
+            printf("OUT OF MEMORY!\n");
+            return 1; // fail out
+        }
+        b->sz = newsz;
+    }
+    memcpy(b->buf + b->pos, p, sz);
+    b->pos += sz;
+    return 0;
+}
+
+const char *mud_prop_fnreader(lua_State *lua_state, void *data, size_t *sz) {
+    mud_prop_fnbuf_t *b = data;
+    *sz = b->sz;
+    return (const char *)b->buf;
 }
 
 int mud_obj_set(lua_State *lua_state) {
@@ -144,6 +167,20 @@ int mud_obj_set(lua_State *lua_state) {
             }
             break;
         }
+        case LUA_TFUNCTION: {
+            mud_prop_fnbuf_t b = {
+                .buf = malloc(1024), .pos = 0, .sz = 1024 
+            };
+
+            lua_dump(lua_state, mud_prop_fnwriter, &b, 0);
+            if(sqlite3_bind_blob(stmt, 4, b.buf, b.pos, NULL) != SQLITE_OK) {
+                free(b.buf);
+                sqlite3_finalize(stmt);
+                return mud_err(lua_state, "Unable to bind value.");
+            }
+            free(b.buf);
+            break;
+        }
         default:
             sqlite3_finalize(stmt);
             return mud_err(lua_state, "Invalid type.");
@@ -196,12 +233,23 @@ int mud_obj_get(lua_State *lua_state) {
     } else {
         int proptype = sqlite3_column_int(stmt, 0);
         switch(proptype) {
-            case LUA_TNUMBER:
+            case LUA_TNUMBER: {
                 lua_pushnumber(lua_state, sqlite3_column_int(stmt, 1));
                 break;
-            case LUA_TSTRING:
+            }
+            case LUA_TSTRING: {
                 lua_pushstring(lua_state, (const char *)sqlite3_column_text(stmt, 1));
                 break;
+            }
+            case LUA_TFUNCTION: {
+                mud_prop_fnbuf_t b = {
+                    .buf = (uint8_t *)sqlite3_column_blob(stmt, 1),
+                    .pos = 0,
+                    .sz = sqlite3_column_bytes(stmt, 1)
+                };
+                lua_load(lua_state, mud_prop_fnreader, &b, "mudfn", "bt");
+                break;
+            }
             default:
                 sqlite3_finalize(stmt);
                 return mud_err(lua_state, "Invalid type of property.");
@@ -288,7 +336,8 @@ int main(int argc, char **argv) {
     *es = &m;
     luaL_openlibs(lua_state);
     lua_register(lua_state, "mud_obj", mud_obj);
-    luaL_loadstring(lua_state, "m = mud_obj(0); print(m.name); m.foo = 12; m.foo = nil");
+//    luaL_loadstring(lua_state, "m = mud_obj(0); print(m.name); m.foo = 12; m.foo = nil;function benji(); print('meow'); end; m.benji = benji; debug.debug()");
+    luaL_loadstring(lua_state, "debug.debug()");
     lua_pcall(lua_state, 0, LUA_MULTRET, 0);
 
     sqlite3_close(m.db);
