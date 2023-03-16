@@ -47,6 +47,59 @@ static void dumpstack (lua_State *L) {
   }
 }
 
+int mud_obj_set(lua_State *lua_state) {
+    luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
+    mud_obj_t *obj = NULL;
+    const char *propname = NULL;
+    const char *propval = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int sqlite3_rc = 0;
+
+    if(lua_gettop(lua_state) < 3 || !lua_isstring(lua_state, -2)) {
+        lua_pushliteral(lua_state, "Invalid call.");
+        lua_error(lua_state);
+        return 1;
+    }
+    propval = lua_tostring(lua_state, -1); lua_pop(lua_state, 1);
+    propname = lua_tostring(lua_state, -1); lua_pop(lua_state, 1);
+    obj = lua_touserdata(lua_state, -1); lua_pop(lua_state, 1);
+
+    if(sqlite3_prepare_v3(m->db, "insert into mud_prop(obj_id, name, val) values (?, ?, ?)", -1, 0, &stmt, NULL) != SQLITE_OK) {
+        lua_pushliteral(lua_state, "Unable to prepare query.");
+        lua_error(lua_state);
+        return 1;
+    }
+
+    if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
+        lua_pushliteral(lua_state, "Unable to bind ID.");
+        lua_error(lua_state);
+        goto mud_obj_set_end;
+    }
+
+    if(sqlite3_bind_text(stmt, 2, propname, -1, NULL) != SQLITE_OK) {
+        lua_pushliteral(lua_state, "Unable to bind name.");
+        lua_error(lua_state);
+        goto mud_obj_set_end;
+    }
+
+    if(sqlite3_bind_text(stmt, 3, propval, -1, NULL) != SQLITE_OK) {
+        lua_pushliteral(lua_state, "Unable to bind value.");
+        lua_error(lua_state);
+        goto mud_obj_set_end;
+    }
+
+    if(sqlite3_step(stmt) != SQLITE_DONE) {
+        lua_pushliteral(lua_state, "Odd return from step.");
+        lua_error(lua_state);
+        goto mud_obj_set_end;
+    }
+
+mud_obj_set_end:
+    sqlite3_finalize(stmt);
+
+    return 1;
+}
+
 int mud_obj_get(lua_State *lua_state) {
     luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
     mud_obj_t *obj = NULL;
@@ -139,9 +192,15 @@ int mud_obj(lua_State *lua_state) {
 
     lua_pushlightuserdata(lua_state, mud_obj);
     lua_createtable(lua_state, 0, 1); /* narr, nrec */
+
     lua_pushliteral(lua_state, "__index");
     lua_pushcfunction(lua_state, mud_obj_get);
     lua_rawset(lua_state, -3);
+
+    lua_pushliteral(lua_state, "__newindex");
+    lua_pushcfunction(lua_state, mud_obj_set);
+    lua_rawset(lua_state, -3);
+
     lua_setmetatable(lua_state, -2);
 
 mud_obj_end:
@@ -168,7 +227,7 @@ int main(int argc, char **argv) {
     *es = &m;
     luaL_openlibs(lua_state);
     lua_register(lua_state, "mud_obj", mud_obj);
-    luaL_loadstring(lua_state, "m = mud_obj(0); print(m.name)");
+    luaL_loadstring(lua_state, "m = mud_obj(0); print(m.name); m.foo = 'bar'");
     lua_pcall(lua_state, 0, LUA_MULTRET, 0);
 
     sqlite3_close(m.db);
