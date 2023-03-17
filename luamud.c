@@ -323,7 +323,6 @@ int main(int argc, char **argv) {
     luamud_t m;
     sqlite3_stmt *stmt = NULL;
     lua_State *lua_state = NULL;
-    int lua_result = 0;
 
     rc = sqlite3_open("luamud.sqlite", &(m.db));
     if (rc) {
