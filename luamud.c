@@ -212,6 +212,11 @@ int mud_obj_get(lua_State *lua_state) {
     propname = lua_tostring(lua_state, -1); lua_pop(lua_state, 1);
     obj = lua_touserdata(lua_state, -1); lua_pop(lua_state, 1);
 
+    if (propname && *propname == '.') {
+        if (!strncmp(propname, ".owner", 6)) {
+        }
+    }
+
     if (obj->marker != MUD_MARKER) return mud_err(lua_state, "Invalid object.");
 
     if(sqlite3_prepare_v3(m->db, "select type, val from mud_prop where obj_id = ? and name = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
@@ -261,48 +266,15 @@ int mud_obj_get(lua_State *lua_state) {
     return 1;
 }
 
-int mud_obj(lua_State *lua_state) {
-    DBG();
-
-    luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
-    sqlite3_stmt *stmt = NULL;
-    int sqlite3_rc = 0;
-    int r = 0;
-    int obj_id = 0;
-    mud_obj_t *mud_obj = NULL;
-
-    if (lua_gettop(lua_state) < 1 || !lua_isnumber(lua_state, 1))
-        return mud_err(lua_state, "Need object ID");
-
-    obj_id = lua_tointeger(lua_state, 1);
-    lua_pop(lua_state, 1);
-
-    // TODO: create obj if doesn't exist?
-
-    if(sqlite3_prepare_v3(m->db, "select id, par_id, loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
-        return mud_err(lua_state, "Unable to prepare query.");
-
-    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind ID.");
-    }
-
-    if(sqlite3_step(stmt) != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to fetch row.");
-    }
-
-    mud_obj = malloc(sizeof(*mud_obj));
+int push_mud_obj(lua_State *lua_state, int id, int par_id, int loc_id) {
+    mud_obj_t *mud_obj = malloc(sizeof(*mud_obj));
     memset(mud_obj, 0, sizeof(*mud_obj));
     mud_obj->marker = MUD_MARKER;
-    mud_obj->id = sqlite3_column_int(stmt, 1);
-    mud_obj->par = sqlite3_column_int(stmt, 2);
-    mud_obj->loc = sqlite3_column_int(stmt, 3);
-
-    sqlite3_finalize(stmt);
+    mud_obj->id = id;
+    mud_obj->par = par_id;
+    mud_obj->loc = loc_id;
 
     lua_pushlightuserdata(lua_state, mud_obj);
-//    lua_newtable(lua_state);
     lua_createtable(lua_state, 0, 1); /* narr, nrec */
 
     lua_pushliteral(lua_state, "__index");
@@ -318,10 +290,92 @@ int mud_obj(lua_State *lua_state) {
     return 1;
 }
 
+int create_mud_obj(lua_State *lua_state, luamud_t *m) {
+    sqlite3_stmt *stmt = NULL;
+    int id = 0;
+
+    if(sqlite3_prepare_v3(m->db, "insert into mud_obj(par_id, loc_id, own_id) values(0, 0, 0)", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return mud_err(lua_state, "Unable to prepare insert.");
+
+    if(sqlite3_step(stmt) != SQLITE_DONE) {
+        sqlite3_finalize(stmt);
+        return mud_err(lua_state, "Unable to create obj.");
+    }
+    sqlite3_finalize(stmt);
+
+    if(sqlite3_prepare_v3(m->db, "select last_insert_rowid()", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return mud_err(lua_state, "Unable to prepare query.");
+
+    if(sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return mud_err(lua_state, "Unable to step select.");
+    }
+
+    id = sqlite3_column_int(stmt, 1);
+
+    sqlite3_finalize(stmt);
+
+    return push_mud_obj(lua_state, id, 0, 0);
+}
+
+int load_mud_obj(lua_State *lua_state, luamud_t *m, int obj_id) {
+    sqlite3_stmt *stmt = NULL;
+
+    if(sqlite3_prepare_v3(m->db, "select id, par_id, loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return mud_err(lua_state, "Unable to prepare query.");
+
+    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return mud_err(lua_state, "Unable to bind ID.");
+    }
+
+    if(sqlite3_step(stmt) != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        return mud_err(lua_state, "Invalid object ID.");
+    }
+
+    push_mud_obj(lua_state,
+        sqlite3_column_int(stmt, 1),
+        sqlite3_column_int(stmt, 2),
+        sqlite3_column_int(stmt, 3)
+    );
+
+    sqlite3_finalize(stmt);
+
+    return 1;
+}
+
+int mud_obj(lua_State *lua_state) {
+    DBG();
+
+    luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
+    sqlite3_stmt *stmt = NULL;
+    int sqlite3_rc = 0;
+    int r = 0;
+    int obj_id = 0;
+    mud_obj_t *mud_obj = NULL;
+
+    if (lua_gettop(lua_state) < 1)
+        return create_mud_obj(lua_state, m);
+
+    if (!lua_isnumber(lua_state, 1))
+        return mud_err(lua_state, "Need object ID");
+
+    obj_id = lua_tointeger(lua_state, 1);
+    lua_pop(lua_state, 1);
+
+    return load_mud_obj(lua_state, m, obj_id);
+}
+
+int main_cont(lua_State *lua_state, int status, lua_KContext ctx) {
+    luamud_t *m = (luamud_t *)ctx;
+    sqlite3_close(m->db);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int rc = 0;
     luamud_t m;
-    sqlite3_stmt *stmt = NULL;
     lua_State *lua_state = NULL;
 
     rc = sqlite3_open("luamud.sqlite", &(m.db));
@@ -337,9 +391,5 @@ int main(int argc, char **argv) {
     lua_register(lua_state, "mud_obj", mud_obj);
 //    luaL_loadstring(lua_state, "m = mud_obj(0); print(m.name); m.foo = 12; m.foo = nil;function benji(); print('meow'); end; m.benji = benji; debug.debug()");
     luaL_loadstring(lua_state, "debug.debug()");
-    lua_pcall(lua_state, 0, LUA_MULTRET, 0);
-
-    sqlite3_close(m.db);
-
-    return 0;
+    return main_cont(lua_state, lua_pcall(lua_state, 0, LUA_MULTRET, 0), (lua_KContext)&m);
 }
