@@ -1,3 +1,6 @@
+#define i_implement // define this to implement many STC functions as shared symbols
+#include <stc/cstr.h>
+
 #include <lua.h>
 #include <lualib.h>
 #include <lauxlib.h>
@@ -5,10 +8,20 @@
 #include <sqlite3.h>
 #include <stdlib.h> /* malloc/free */
 #include <string.h> /* memset */
+#include <stdbool.h> /* bool, duh */
+#include <signal.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <regex.h>
 
 #define DEBUG
 
 #define MUD_MARKER 0xBEADDEEF
+
+char inbuf[1024];
 
 typedef struct {
     sqlite3 *db;
@@ -169,7 +182,7 @@ int mud_obj_set(lua_State *lua_state) {
         }
         case LUA_TFUNCTION: {
             mud_prop_fnbuf_t b = {
-                .buf = malloc(1024), .pos = 0, .sz = 1024 
+                .buf = malloc(1024), .pos = 0, .sz = 1024
             };
 
             lua_dump(lua_state, mud_prop_fnwriter, &b, 0);
@@ -373,10 +386,201 @@ int main_cont(lua_State *lua_state, int status, lua_KContext ctx) {
     return 0;
 }
 
+int create_socket(int port) {
+    int s;
+    struct sockaddr_in addr;
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) {
+        perror("Unable to create socket");
+        exit(EXIT_FAILURE);
+    }
+
+    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Unable to bind");
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(s, 1) < 0) {
+        perror("Unable to listen");
+        exit(EXIT_FAILURE);
+    }
+
+    return s;
+}
+
+SSL_CTX *create_context() {
+    const SSL_METHOD *method;
+    SSL_CTX *ctx;
+
+    method = TLS_server_method();
+
+    ctx = SSL_CTX_new(method);
+    if (!ctx) {
+        perror("Unable to create SSL context");
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    return ctx;
+}
+
+void configure_context(SSL_CTX *ctx) {
+   /* Set the key and cert */
+    if (SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) <= 0 ) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+}
+
+typedef struct {
+    SSL *ssl;
+    int clientsocket, obj_id;
+    luamud_t *mud;
+} connection_t;
+
+bool iscommand(char *buf, size_t buf_len, char *cmd) {
+    size_t cmd_len = strlen(cmd);
+    if (buf_len < cmd_len) return false;
+    return strncmp(buf, cmd, cmd_len) == 0;
+}
+
+void command_who(connection_t *connection) {
+    sqlite3_stmt *stmt = NULL;
+
+    if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, username from mud_auth where connected = 1", -1, 0, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "Unable to prepare who query.\n");
+        return;
+    }
+
+    while(sqlite3_step(stmt) == SQLITE_ROW) {
+        int obj_id = sqlite3_column_int(stmt, 0);
+        const unsigned char *username = sqlite3_column_text(stmt, 1);
+        cstr out = cstr_from_fmt("%d %s\n", obj_id, username);
+        SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+    }
+    sqlite3_finalize(stmt);
+}
+
+void *connected(void *arg) {
+    connection_t *connection = (connection_t *)arg;
+    sqlite3_stmt *stmt = NULL;
+    size_t readbytes = 0;
+
+    lua_State *lua_state = luaL_newstate();
+    void **es = (void **)lua_getextraspace(lua_state);
+    *es = connection->mud;
+    luaL_openlibs(lua_state);
+    lua_register(lua_state, "mud_obj", mud_obj);
+
+//    luaL_loadstring(lua_state, "debug.debug()");
+//    return main_cont(lua_state, lua_pcall(lua_state, 0, LUA_MULTRET, 0), (lua_KContext)&connection->mud);
+
+    while(!connection->obj_id) { /* unauthenticated */
+        regex_t preg;
+        regmatch_t matches[3];
+        regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
+        SSL_write(connection->ssl, "Connect: ", 9);
+        while(1) {
+            readbytes = SSL_read(connection->ssl, inbuf, 1024);
+            if (readbytes <= 0) break;
+            inbuf[readbytes - 1] = '\0'; /* remove EOL, or mark end of buf */
+            if(regexec(&preg, inbuf, 3, matches, 0) == 0) {
+                cstr username = cstr_from_n(inbuf + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
+
+                if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
+                    mud_err(lua_state, "Error: unable to prepare query.");
+                    return NULL;
+                }
+
+                if (sqlite3_bind_text(stmt, 1, cstr_str(&username), cstr_size(&username), NULL) != SQLITE_OK) {
+                    sqlite3_finalize(stmt);
+                    mud_err(lua_state, "Unable to bind user/pass.");
+                    return NULL;
+                } else if(sqlite3_step(stmt) != SQLITE_ROW) {
+                    cstr out = cstr_from_fmt("Invalid username/password.\n");
+                    SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+                    sqlite3_finalize(stmt);
+                    continue;
+                }
+
+                int obj_id = sqlite3_column_int(stmt, 0);
+                const unsigned char *password = sqlite3_column_text(stmt, 1), *password_salt = sqlite3_column_text(stmt, 2);
+
+                EVP_MD_CTX *mdctx;
+                const EVP_MD *md;
+                unsigned char md_value[EVP_MAX_MD_SIZE];
+                unsigned int md_len;
+
+                OpenSSL_add_all_digests();
+
+                mdctx = EVP_MD_CTX_create();
+                EVP_DigestInit(mdctx, EVP_sha1());
+                EVP_DigestUpdate(mdctx, password_salt, strlen((const char *)password_salt));
+                EVP_DigestUpdate(mdctx, inbuf + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
+                EVP_DigestFinal(mdctx, md_value, &md_len);
+                EVP_MD_CTX_destroy(mdctx);
+                for(int i = 0; i < md_len; i++) printf("%02X", md_value[i]);
+                printf("\n");
+
+                BIO *bio_b64 = BIO_new(BIO_f_base64());
+                BIO *bio_mem = BIO_new(BIO_s_mem());
+                BIO_push(bio_b64, bio_mem);
+                BIO_write(bio_b64, md_value, md_len);
+                BIO_flush(bio_b64);
+                md_len = BIO_read(bio_mem, md_value, sizeof(md_value));
+                md_value[md_len] = '\0';
+                md_value[md_len - 1] = '\0'; // eat CR
+
+                EVP_cleanup();
+                printf("FOO USER '%s' PASS '%s' SALT '%s'\n", cstr_str(&username), password, password_salt);
+                printf("COMP PASS '%s'\n", md_value);
+
+                if (strcmp(password, (const char *)md_value)) {
+                    cstr out = cstr_from_fmt("Invalid username/password.\n");
+                    SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+                    continue;
+                }
+
+                sqlite3_finalize(stmt);
+
+                cstr out = cstr_from_fmt("Connected.\n");
+                SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+                connection->obj_id = obj_id;
+            }
+        }
+    }
+
+    while(1) {
+        readbytes = SSL_read(connection->ssl, inbuf, 1024);
+        if (readbytes <= 0) break;
+
+        if(iscommand(inbuf, readbytes, "@who")) {
+            command_who(connection);
+        }
+    }
+
+    SSL_shutdown(connection->ssl);
+    SSL_free(connection->ssl);
+    close(connection->clientsocket);
+    free(connection);
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     int rc = 0;
+    int srv_sock = 0;
+    SSL_CTX *srv_ctx = NULL;
     luamud_t m;
-    lua_State *lua_state = NULL;
 
     rc = sqlite3_open("luamud.sqlite", &(m.db));
     if (rc) {
@@ -384,12 +588,41 @@ int main(int argc, char **argv) {
         return rc;
     }
 
-    lua_state = luaL_newstate();
-    void **es = (void **)lua_getextraspace(lua_state);
-    *es = &m;
-    luaL_openlibs(lua_state);
-    lua_register(lua_state, "mud_obj", mud_obj);
-//    luaL_loadstring(lua_state, "m = mud_obj(0); print(m.name); m.foo = 12; m.foo = nil;function benji(); print('meow'); end; m.benji = benji; debug.debug()");
-    luaL_loadstring(lua_state, "debug.debug()");
-    return main_cont(lua_state, lua_pcall(lua_state, 0, LUA_MULTRET, 0), (lua_KContext)&m);
+    signal(SIGPIPE, SIG_IGN);
+    srv_ctx = create_context();
+    configure_context(srv_ctx);
+    srv_sock = create_socket(1234);
+
+    while(1) {
+        struct sockaddr_in addr;
+        unsigned int len = sizeof(addr);
+        SSL *ssl = NULL;
+
+        int client = accept(srv_sock, (struct sockaddr *)&addr, &len);
+        if (client < 0) {
+            perror("Unable to accept.");
+            exit(EXIT_FAILURE);
+        }
+
+        ssl = SSL_new(srv_ctx);
+        SSL_set_fd(ssl, client);
+
+        if (SSL_accept(ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+        } else {
+            pthread_t t;
+            pthread_attr_t ta;
+            connection_t *conn_ptr = NULL;
+
+            conn_ptr = malloc(sizeof(*conn_ptr));
+            conn_ptr->ssl = ssl; conn_ptr->clientsocket = client; conn_ptr->mud = &m;
+
+            pthread_attr_init(&ta);
+            pthread_attr_setdetachstate(&ta, PTHREAD_CREATE_DETACHED);
+            pthread_create(&t, &ta, connected, conn_ptr);
+        }
+    }
+
+    close(srv_sock);
+    SSL_CTX_free(srv_ctx);
 }

@@ -10,13 +10,12 @@ add_custom_command(
 
 add_custom_target(luamud_sqlite ALL DEPENDS ${PROJECT_BINARY_DIR}/luamud.sqlite)
 
-include_directories(/usr/local/include/lua)
-
-link_directories(/usr/local/lib)
+include_directories(/usr/include/lua5.4)
+include_directories(../STC/include)
 
 add_executable(
     luamud
     luamud.c
 )
 
-target_link_libraries(luamud sqlite3 lua)
+target_link_libraries(luamud sqlite3 lua5.4 ssl crypto)

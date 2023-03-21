@@ -33,15 +33,29 @@ Persistence of the LuaMUD will be in a SQLite database with a simplistic, genre-
 ### Features
 
 While Lua has cooperative multitasking (through continuations), support for pre-emptive multitasking requires a complex third-party library such as Lua Lanes. Instead I am proposing LuaMUD write its own multitasking architecture:
+
 * Pthreads for multi-threading, each thread being dedicated to one Lua state of execution.
-* Inter-thread communications via a software bus (MQTT?)
+* Inter-thread communications via SQLite temporary table and a semaphore to signal data available.
 * All SQLite interactions will be wrapped in functions to provide an object-oriented view of the system to Lua.
-* Security for Lua -- no network/file I/O, no loading of libraries, limited RAM.
+* Sandbox for Lua -- no network/file I/O, no loading of libraries, no direct access to SQLite, limited RAM + IO.
 * Per-user resource quotas.
 * Fine-grained object/property access permissions.
-* SSH/TLS connectivity.
+* TLS connectivity via OpenSSL.
+* User authentication via TLS client cert, TOTP, user/pass.
 * Support for a variety of clients (TinyFugue, web browser, SSH client, ???)
 * Object-oriented capabilities: inheritance, class methods.
 * Minimal "standard" properties.
 * Simple in-game editing/tracing/debugging of Lua source.
 * Minimal built-in game verbs.
+* Data-at-rest cryptography? (Need to ensure admins can read/write encrypted data.)
+* NO GNU Readline for command editing, autocompletion, and history.
+* STC for strings/datatypes - https://github.com/tylov/STC
+
+## TODO
+
+* Lua memory tracking/limiting.
+* Command-handling loop.
+* Access control.
+* Recursive query (?) for property retrieval.
+* GNU Readline and OpenSSL seem incompatible; GNU Readline needs a `FILE *` for input and output. OpenSSL requires calls to `SSL_read()` and `SSL_write()`. Any (reasonable) way around this?
+* Move SHA1 to BIO?
