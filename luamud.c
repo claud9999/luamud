@@ -16,6 +16,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <regex.h>
+#include <stdarg.h>
 
 #define DEBUG
 
@@ -62,6 +63,14 @@ static void dumpstack (lua_State *L, const char *pfx) {
 int mud_err(lua_State *lua_state, const char *msg) {
     lua_pushstring(lua_state, msg);
     lua_error(lua_state);
+    return 1;
+}
+
+int sql_err(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
     return 1;
 }
 
@@ -118,22 +127,17 @@ int mud_obj_set(lua_State *lua_state) {
 
         if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
             sqlite3_finalize(stmt);
-            return mud_err(lua_state, "Unable to bind obj id.");
-        }
-
-        if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
-            sqlite3_finalize(stmt);
-            return mud_err(lua_state, "Unable to bind obj id.");
+            return sql_err("Unable to bind obj id.");
         }
 
         if(sqlite3_bind_text(stmt, 2, propname, -1, NULL) != SQLITE_OK) {
             sqlite3_finalize(stmt);
-            return mud_err(lua_state, "Unable to bind name.");
+            return sql_err("Unable to bind name.");
         }
 
         if(sqlite3_step(stmt) != SQLITE_DONE) {
             sqlite3_finalize(stmt);
-            return mud_err(lua_state, "Unable to bind name.");
+            return sql_err("Unable to step query.");
         }
 
         sqlite3_finalize(stmt);
@@ -145,21 +149,22 @@ int mud_obj_set(lua_State *lua_state) {
 
     // TODO: handle if the prop already exists
 
-    if(sqlite3_prepare_v3(m->db, "insert into mud_prop(obj_id, name, type, val) values (?, ?, ?, ?)", -1, 0, &stmt, NULL) != SQLITE_OK) return mud_err(lua_state, "Unable to prepare query.");
+    if(sqlite3_prepare_v3(m->db, "insert into mud_prop(obj_id, name, type, val) values (?, ?, ?, ?)", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return sql_err("Unable to prepare query.");
 
     if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
         sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind ID.");
+        return sql_err("Unable to bind ID.");
     }
 
     if(sqlite3_bind_text(stmt, 2, propname, -1, NULL) != SQLITE_OK) {
         sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind name.");
+        return sql_err("Unable to bind name.");
     }
 
     if(sqlite3_bind_int(stmt, 3, proptype) != SQLITE_OK) {
         sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind ID.");
+        return sql_err("Unable to bind proptype.");
     }
 
     switch (proptype) {
@@ -168,7 +173,7 @@ int mud_obj_set(lua_State *lua_state) {
             int propval = lua_tonumber(lua_state, -1);
             if(sqlite3_bind_int(stmt, 4, propval) != SQLITE_OK) {
                 sqlite3_finalize(stmt);
-                return mud_err(lua_state, "Unable to bind value.");
+                return sql_err("Unable to bind value.");
             }
             break;
         }
@@ -176,7 +181,7 @@ int mud_obj_set(lua_State *lua_state) {
             const char *propval = lua_tostring(lua_state, -1);
             if(sqlite3_bind_text(stmt, 4, propval, -1, NULL) != SQLITE_OK) {
                 sqlite3_finalize(stmt);
-                return mud_err(lua_state, "Unable to bind value.");
+                return sql_err("Unable to bind value.");
             }
             break;
         }
@@ -189,7 +194,7 @@ int mud_obj_set(lua_State *lua_state) {
             if(sqlite3_bind_blob(stmt, 4, b.buf, b.pos, NULL) != SQLITE_OK) {
                 free(b.buf);
                 sqlite3_finalize(stmt);
-                return mud_err(lua_state, "Unable to bind value.");
+                return sql_err("Unable to bind value.");
             }
             free(b.buf);
             break;
@@ -203,7 +208,7 @@ int mud_obj_set(lua_State *lua_state) {
 
     if(sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Odd return from step.");
+        return sql_err("Odd return from step.");
     }
 
     sqlite3_finalize(stmt);
@@ -454,19 +459,26 @@ bool iscommand(char *buf, size_t buf_len, char *cmd) {
     return strncmp(buf, cmd, cmd_len) == 0;
 }
 
+int conn_send(connection_t *connection, const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    size_t sz = vsnprintf(buf, sizeof(buf), fmt, ap);
+    return SSL_write(connection->ssl, buf, sz);
+}
+
 void command_who(connection_t *connection) {
     sqlite3_stmt *stmt = NULL;
 
     if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, username from mud_auth where connected = 1", -1, 0, &stmt, NULL) != SQLITE_OK) {
-        fprintf(stderr, "Unable to prepare who query.\n");
+        sql_err("Unable to prepare who query.\n");
         return;
     }
 
     while(sqlite3_step(stmt) == SQLITE_ROW) {
         int obj_id = sqlite3_column_int(stmt, 0);
         const unsigned char *username = sqlite3_column_text(stmt, 1);
-        cstr out = cstr_from_fmt("%d %s\n", obj_id, username);
-        SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+        if (conn_send(connection, "%d %s\n", obj_id, username) < 0) return;
     }
     sqlite3_finalize(stmt);
 }
@@ -489,7 +501,7 @@ void *connected(void *arg) {
         regex_t preg;
         regmatch_t matches[3];
         regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
-        SSL_write(connection->ssl, "Connect: ", 9);
+        if (conn_send(connection, "Connect: ") < 0) return NULL;
         while(1) {
             readbytes = SSL_read(connection->ssl, inbuf, 1024);
             if (readbytes <= 0) break;
@@ -498,17 +510,16 @@ void *connected(void *arg) {
                 cstr username = cstr_from_n(inbuf + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
 
                 if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
-                    mud_err(lua_state, "Error: unable to prepare query.");
+                    sql_err("Error: unable to prepare query.\n");
                     return NULL;
                 }
 
                 if (sqlite3_bind_text(stmt, 1, cstr_str(&username), cstr_size(&username), NULL) != SQLITE_OK) {
                     sqlite3_finalize(stmt);
-                    mud_err(lua_state, "Unable to bind user/pass.");
+                    sql_err("Unable to bind user/pass.");
                     return NULL;
                 } else if(sqlite3_step(stmt) != SQLITE_ROW) {
-                    cstr out = cstr_from_fmt("Invalid username/password.\n");
-                    SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+                    if(conn_send(connection, "Invalid username/password.\n")) return NULL;
                     sqlite3_finalize(stmt);
                     continue;
                 }
@@ -529,8 +540,6 @@ void *connected(void *arg) {
                 EVP_DigestUpdate(mdctx, inbuf + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
                 EVP_DigestFinal(mdctx, md_value, &md_len);
                 EVP_MD_CTX_destroy(mdctx);
-                for(int i = 0; i < md_len; i++) printf("%02X", md_value[i]);
-                printf("\n");
 
                 BIO *bio_b64 = BIO_new(BIO_f_base64());
                 BIO *bio_mem = BIO_new(BIO_s_mem());
@@ -544,19 +553,18 @@ void *connected(void *arg) {
                 EVP_cleanup();
 
                 if (strcmp(password, (const char *)md_value)) {
-                    cstr out = cstr_from_fmt("Invalid username/password.\n");
-                    SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+                    if (conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
                     continue;
                 }
 
                 sqlite3_finalize(stmt);
 
-                cstr out = cstr_from_fmt("Connected.\n");
-                SSL_write(connection->ssl, cstr_str(&out), cstr_size(&out));
+                if (conn_send(connection, "Connected.\n") < 0) return NULL;
                 connection->obj_id = obj_id;
             }
         }
     }
+    printf("auth\n");
 
     while(1) {
         readbytes = SSL_read(connection->ssl, inbuf, 1024);
@@ -582,7 +590,7 @@ int main(int argc, char **argv) {
 
     rc = sqlite3_open("luamud.sqlite", &(m.db));
     if (rc) {
-        fprintf(stderr, "Can't open database '%s': %s\n", "luamud.sqlite", sqlite3_errmsg(m.db));
+        sql_err("Can't open database '%s': %s\n", "luamud.sqlite", sqlite3_errmsg(m.db));
         return rc;
     }
 
