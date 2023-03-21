@@ -1,4 +1,5 @@
 project(luamud)
+set (CMAKE_C_FLAGS "-g -DDEBUG")
 
 cmake_minimum_required(VERSION 3.1)
 
