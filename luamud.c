@@ -497,71 +497,70 @@ void *connected(void *arg) {
 //    luaL_loadstring(lua_state, "debug.debug()");
 //    return main_cont(lua_state, lua_pcall(lua_state, 0, LUA_MULTRET, 0), (lua_KContext)&connection->mud);
 
+    regex_t preg;
+    regmatch_t matches[3];
+    regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
     while(!connection->obj_id) { /* unauthenticated */
-        regex_t preg;
-        regmatch_t matches[3];
-        regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
         if (conn_send(connection, "Connect: ") < 0) return NULL;
-        while(1) {
-            readbytes = SSL_read(connection->ssl, inbuf, 1024);
-            if (readbytes <= 0) break;
-            inbuf[readbytes - 1] = '\0'; /* remove EOL, or mark end of buf */
-            if(regexec(&preg, inbuf, 3, matches, 0) == 0) {
-                cstr username = cstr_from_n(inbuf + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
 
-                if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
-                    sql_err("Error: unable to prepare query.\n");
-                    return NULL;
-                }
+        readbytes = SSL_read(connection->ssl, inbuf, 1024);
+        if (readbytes <= 0) break;
+        inbuf[readbytes - 1] = '\0'; /* remove EOL, or mark end of buf */
+        if(regexec(&preg, inbuf, 3, matches, 0) == 0) {
+            cstr username = cstr_from_n(inbuf + matches[1].rm_so, matches[1].rm_eo - matches[1].rm_so);
 
-                if (sqlite3_bind_text(stmt, 1, cstr_str(&username), cstr_size(&username), NULL) != SQLITE_OK) {
-                    sqlite3_finalize(stmt);
-                    sql_err("Unable to bind user/pass.");
-                    return NULL;
-                } else if(sqlite3_step(stmt) != SQLITE_ROW) {
-                    if(conn_send(connection, "Invalid username/password.\n")) return NULL;
-                    sqlite3_finalize(stmt);
-                    continue;
-                }
-
-                int obj_id = sqlite3_column_int(stmt, 0);
-                const unsigned char *password = sqlite3_column_text(stmt, 1), *password_salt = sqlite3_column_text(stmt, 2);
-
-                EVP_MD_CTX *mdctx;
-                const EVP_MD *md;
-                unsigned char md_value[EVP_MAX_MD_SIZE];
-                unsigned int md_len;
-
-                OpenSSL_add_all_digests();
-
-                mdctx = EVP_MD_CTX_create();
-                EVP_DigestInit(mdctx, EVP_sha1());
-                EVP_DigestUpdate(mdctx, password_salt, strlen((const char *)password_salt));
-                EVP_DigestUpdate(mdctx, inbuf + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
-                EVP_DigestFinal(mdctx, md_value, &md_len);
-                EVP_MD_CTX_destroy(mdctx);
-
-                BIO *bio_b64 = BIO_new(BIO_f_base64());
-                BIO *bio_mem = BIO_new(BIO_s_mem());
-                BIO_push(bio_b64, bio_mem);
-                BIO_write(bio_b64, md_value, md_len);
-                BIO_flush(bio_b64);
-                md_len = BIO_read(bio_mem, md_value, sizeof(md_value));
-                md_value[md_len] = '\0';
-                md_value[md_len - 1] = '\0'; // eat CR
-
-                EVP_cleanup();
-
-                if (strcmp(password, (const char *)md_value)) {
-                    if (conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
-                    continue;
-                }
-
-                sqlite3_finalize(stmt);
-
-                if (conn_send(connection, "Connected.\n") < 0) return NULL;
-                connection->obj_id = obj_id;
+            if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
+                sql_err("Error: unable to prepare query.\n");
+                return NULL;
             }
+
+            if (sqlite3_bind_text(stmt, 1, cstr_str(&username), cstr_size(&username), NULL) != SQLITE_OK) {
+                sqlite3_finalize(stmt);
+                sql_err("Unable to bind user/pass.");
+                return NULL;
+            } else if(sqlite3_step(stmt) != SQLITE_ROW) {
+                if(conn_send(connection, "Invalid username/password.\n")) return NULL;
+                sqlite3_finalize(stmt);
+                continue;
+            }
+
+            int obj_id = sqlite3_column_int(stmt, 0);
+            const unsigned char *password = sqlite3_column_text(stmt, 1), *password_salt = sqlite3_column_text(stmt, 2);
+
+            EVP_MD_CTX *mdctx;
+            const EVP_MD *md;
+            unsigned char md_value[EVP_MAX_MD_SIZE];
+            unsigned int md_len;
+
+            OpenSSL_add_all_digests();
+
+            mdctx = EVP_MD_CTX_create();
+            EVP_DigestInit(mdctx, EVP_sha1());
+            EVP_DigestUpdate(mdctx, password_salt, strlen((const char *)password_salt));
+            EVP_DigestUpdate(mdctx, inbuf + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
+            EVP_DigestFinal(mdctx, md_value, &md_len);
+            EVP_MD_CTX_destroy(mdctx);
+
+            BIO *bio_b64 = BIO_new(BIO_f_base64());
+            BIO *bio_mem = BIO_new(BIO_s_mem());
+            BIO_push(bio_b64, bio_mem);
+            BIO_write(bio_b64, md_value, md_len);
+            BIO_flush(bio_b64);
+            md_len = BIO_read(bio_mem, md_value, sizeof(md_value));
+            md_value[md_len] = '\0';
+            md_value[md_len - 1] = '\0'; // eat CR
+
+            EVP_cleanup();
+
+            if (strcmp(password, (const char *)md_value)) {
+                if (conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
+                continue;
+            }
+
+            sqlite3_finalize(stmt);
+
+            if (conn_send(connection, "Connected, obj_id=%d.\n", obj_id) < 0) return NULL;
+            connection->obj_id = obj_id;
         }
     }
     printf("auth\n");
