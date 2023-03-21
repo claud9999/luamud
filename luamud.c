@@ -542,8 +542,6 @@ void *connected(void *arg) {
                 md_value[md_len - 1] = '\0'; // eat CR
 
                 EVP_cleanup();
-                printf("FOO USER '%s' PASS '%s' SALT '%s'\n", cstr_str(&username), password, password_salt);
-                printf("COMP PASS '%s'\n", md_value);
 
                 if (strcmp(password, (const char *)md_value)) {
                     cstr out = cstr_from_fmt("Invalid username/password.\n");
