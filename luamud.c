@@ -18,8 +18,6 @@
 #include <regex.h>
 #include <stdarg.h>
 
-#define DEBUG
-
 #define MUD_MARKER 0xBEADDEEF
 
 char inbuf[1024];
@@ -103,6 +101,7 @@ const char *mud_prop_fnreader(lua_State *lua_state, void *data, size_t *sz) {
     return (const char *)b->buf;
 }
 
+/* returns 0 on success */
 int mud_obj_set(lua_State *lua_state) {
     DBG();
 
@@ -144,7 +143,7 @@ int mud_obj_set(lua_State *lua_state) {
 
         lua_pop(lua_state, 3);
 
-        return 1;
+        return 0;
     }
 
     // TODO: handle if the prop already exists
@@ -213,6 +212,93 @@ int mud_obj_set(lua_State *lua_state) {
 
     sqlite3_finalize(stmt);
 
+    return 0;
+}
+
+/* returns 0 on failure, otherwise returns object id */
+int mud_get_parent_id(sqlite3 *db, int obj_id) {
+    sqlite3_stmt *stmt = NULL;
+
+    if(sqlite3_prepare_v3(db, "select par_id from mud_obj where obj_id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return !sql_err("Unable to prepare query.");
+
+    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return !sql_err("Unable to bind ID.");
+    }
+
+    switch(sqlite3_step(stmt)) {
+        case SQLITE_DONE:
+            sqlite3_finalize(stmt);
+            return 0;
+        case SQLITE_ROW: {
+            int par_id = sqlite3_column_int(stmt, 1);
+            sqlite3_finalize(stmt);
+            return par_id;
+        }
+        default:
+            sqlite3_finalize(stmt);
+            return 0;
+    }
+}
+
+/* returns 0 when it finds the property */
+int mud_obj_get_recurse(lua_State *lua_state, sqlite3 *db, int obj_id, const char *name) {
+    if (!obj_id) return 1;
+
+    sqlite3_stmt *stmt = NULL;
+
+    if(sqlite3_prepare_v3(db, "select type, val from mud_prop where obj_id = ? and name = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return sql_err("Unable to prepare query.");
+
+    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return sql_err("Unable to bind ID.");
+    }
+
+    if(sqlite3_bind_text(stmt, 2, name, -1, NULL) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return sql_err("Unable to bind name.");
+    }
+
+    switch(sqlite3_step(stmt)) {
+        case SQLITE_DONE:
+            sqlite3_finalize(stmt);
+            return mud_obj_get_recurse(lua_state, db, mud_get_parent_id(db, obj_id), name);
+        case SQLITE_ROW: {
+            int proptype = sqlite3_column_int(stmt, 0);
+            switch(proptype) {
+                case LUA_TNUMBER: {
+                    lua_pushnumber(lua_state, sqlite3_column_int(stmt, 1));
+                    sqlite3_finalize(stmt);
+                    return 0;
+                }
+                case LUA_TSTRING: {
+                    lua_pushstring(lua_state, (const char *)sqlite3_column_text(stmt, 1));
+                    sqlite3_finalize(stmt);
+                    return 0;
+                }
+                case LUA_TFUNCTION: {
+                    mud_prop_fnbuf_t b = {
+                        .buf = (uint8_t *)sqlite3_column_blob(stmt, 1),
+                        .pos = 0,
+                        .sz = sqlite3_column_bytes(stmt, 1)
+                    };
+                    lua_load(lua_state, mud_prop_fnreader, &b, "mudfn", "bt");
+                    sqlite3_finalize(stmt);
+                    return 0;
+                }
+                default:
+                    sqlite3_finalize(stmt);
+                    return mud_err(lua_state, "Invalid type of property.");
+            }
+            break;
+        }
+        default:
+            sqlite3_finalize(stmt);
+            return mud_err(lua_state, "Invalid datatype.");
+    }
+
     return 1;
 }
 
@@ -225,63 +311,13 @@ int mud_obj_get(lua_State *lua_state) {
     sqlite3_stmt *stmt = NULL;
     int sqlite3_rc = 0;
 
-    if(lua_gettop(lua_state) < 2 || !lua_isstring(lua_state, -1))
-        return mud_err(lua_state, "Invalid call.");
+    if(lua_gettop(lua_state) < 2 || !lua_isstring(lua_state, -1)) return mud_err(lua_state, "Invalid call.");
     propname = lua_tostring(lua_state, -1); lua_pop(lua_state, 1);
     obj = lua_touserdata(lua_state, -1); lua_pop(lua_state, 1);
 
-    if (propname && *propname == '.') {
-        if (!strncmp(propname, ".owner", 6)) {
-        }
-    }
-
     if (obj->marker != MUD_MARKER) return mud_err(lua_state, "Invalid object.");
 
-    if(sqlite3_prepare_v3(m->db, "select type, val from mud_prop where obj_id = ? and name = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
-        return mud_err(lua_state, "Unable to prepare query.");
-
-    if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind ID.");
-    }
-
-    if(sqlite3_bind_text(stmt, 2, propname, -1, NULL) != SQLITE_OK) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind name.");
-    }
-
-    if(sqlite3_step(stmt) != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to fetch row.");
-    } else {
-        int proptype = sqlite3_column_int(stmt, 0);
-        switch(proptype) {
-            case LUA_TNUMBER: {
-                lua_pushnumber(lua_state, sqlite3_column_int(stmt, 1));
-                break;
-            }
-            case LUA_TSTRING: {
-                lua_pushstring(lua_state, (const char *)sqlite3_column_text(stmt, 1));
-                break;
-            }
-            case LUA_TFUNCTION: {
-                mud_prop_fnbuf_t b = {
-                    .buf = (uint8_t *)sqlite3_column_blob(stmt, 1),
-                    .pos = 0,
-                    .sz = sqlite3_column_bytes(stmt, 1)
-                };
-                lua_load(lua_state, mud_prop_fnreader, &b, "mudfn", "bt");
-                break;
-            }
-            default:
-                sqlite3_finalize(stmt);
-                return mud_err(lua_state, "Invalid type of property.");
-        }
-    }
-
-    sqlite3_finalize(stmt);
-
-    return 1;
+    return !mud_obj_get_recurse(lua_state, m->db, obj->id, propname);
 }
 
 int push_mud_obj(lua_State *lua_state, int id, int par_id, int loc_id) {
@@ -453,12 +489,6 @@ typedef struct {
     luamud_t *mud;
 } connection_t;
 
-bool iscommand(char *buf, size_t buf_len, char *cmd) {
-    size_t cmd_len = strlen(cmd);
-    if (buf_len < cmd_len) return false;
-    return strncmp(buf, cmd, cmd_len) == 0;
-}
-
 int conn_send(connection_t *connection, const char *fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -483,19 +513,72 @@ void command_who(connection_t *connection) {
     sqlite3_finalize(stmt);
 }
 
+void mark_connected(connection_t *connection, bool isconnected) {
+    sqlite3_stmt *stmt = NULL;
+
+    if(sqlite3_prepare_v3(connection->mud->db, "update mud_auth set connected = ? where obj_id = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
+        sql_err("Error: unable to prepare query.\n");
+        return;
+    }
+
+    if (sqlite3_bind_int(stmt, 1, connection->obj_id) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sql_err("Unable to bind obj id.");
+        return;
+    }
+
+    if (sqlite3_bind_int(stmt, 2, isconnected ? 1 : 0) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        sql_err("Unable to bind connected flag.");
+        return;
+    }
+
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+int cmdloop(connection_t *connection) {
+    lua_State *lua_state = luaL_newstate();
+    void **es = (void **)lua_getextraspace(lua_state);
+    *es = connection->mud;
+
+    luaL_openlibs(lua_state);
+
+    while(1) {
+        size_t readbytes = SSL_read(connection->ssl, inbuf, 1024);
+        if (readbytes <= 0) break;
+        inbuf[readbytes - 1] = '\0';
+        cstr input = cstr_from(inbuf);
+
+        if(cstr_equals(&input, "@quit")) break;
+        if(cstr_equals(&input, "@who")) { command_who(connection); continue; }
+
+        load_mud_obj(lua_state, connection->mud, connection->obj_id);
+        lua_pushstring(lua_state, inbuf); // TODO tokenize
+
+        mud_obj_get(lua_state);
+        if(lua_isinteger(lua_state, 1)) {
+            conn_send(connection, "%d", lua_tointeger(lua_state, 1));
+            lua_pop(lua_state, 1);
+        }
+        else if(lua_isstring(lua_state, 1)) {
+            conn_send(connection, "%s", lua_tostring(lua_state, 1));
+            lua_pop(lua_state, 1);
+        }
+        else if(lua_isfunction(lua_state, 1)) {
+            // TODO: call it!
+            lua_pop(lua_state, 1);
+        }
+    }
+    lua_close(lua_state);
+
+    return 0;
+}
+
 void *connected(void *arg) {
     connection_t *connection = (connection_t *)arg;
     sqlite3_stmt *stmt = NULL;
     size_t readbytes = 0;
-
-    lua_State *lua_state = luaL_newstate();
-    void **es = (void **)lua_getextraspace(lua_state);
-    *es = connection->mud;
-    luaL_openlibs(lua_state);
-    lua_register(lua_state, "mud_obj", mud_obj);
-
-//    luaL_loadstring(lua_state, "debug.debug()");
-//    return main_cont(lua_state, lua_pcall(lua_state, 0, LUA_MULTRET, 0), (lua_KContext)&connection->mud);
 
     regex_t preg;
     regmatch_t matches[3];
@@ -552,7 +635,7 @@ void *connected(void *arg) {
 
             EVP_cleanup();
 
-            if (strcmp(password, (const char *)md_value)) {
+            if (strcmp((const char *)password, (const char *)md_value)) {
                 if (conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
                 continue;
             }
@@ -561,18 +644,13 @@ void *connected(void *arg) {
 
             if (conn_send(connection, "Connected, obj_id=%d.\n", obj_id) < 0) return NULL;
             connection->obj_id = obj_id;
+            mark_connected(connection, true);
         }
     }
     printf("auth\n");
 
-    while(1) {
-        readbytes = SSL_read(connection->ssl, inbuf, 1024);
-        if (readbytes <= 0) break;
-
-        if(iscommand(inbuf, readbytes, "@who")) {
-            command_who(connection);
-        }
-    }
+    cmdloop(connection);
+    mark_connected(connection, false);
 
     SSL_shutdown(connection->ssl);
     SSL_free(connection->ssl);

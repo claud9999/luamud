@@ -59,3 +59,4 @@ While Lua has cooperative multitasking (through continuations), support for pre-
 * Recursive query (?) for property retrieval.
 * GNU Readline and OpenSSL seem incompatible; GNU Readline needs a `FILE *` for input and output. OpenSSL requires calls to `SSL_read()` and `SSL_write()`. Any (reasonable) way around this?
 * Move SHA1 to BIO?
+* Evaluate WolfSSL instead of OpenSSL.
