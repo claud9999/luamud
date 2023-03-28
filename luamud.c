@@ -19,6 +19,8 @@
 
 char inbuf[1024];
 
+typedef int obj_id_t;
+
 typedef enum {
     SERVER_RUNNING,
     SERVER_SHUTDOWN
@@ -27,12 +29,14 @@ typedef enum {
 server_state_t server_state = SERVER_RUNNING;
 
 typedef struct {
-    int marker, id, par, loc, own;
+    int marker;
+    obj_id_t id, par, loc, own;
 } mud_obj_t;
 
 typedef struct {
     SSL *ssl;
-    int clientsocket, obj_id;
+    int clientsocket;
+    obj_id_t obj_id;
     sqlite3 *db;
 } connection_t;
 
@@ -199,8 +203,9 @@ int mud_obj_set(lua_State *lua_state) { DBG();
     return 0;
 }
 
+// TODO: parameterize which field, possibly macro-ize?
 /* returns 0 on failure, otherwise returns object id */
-int mud_get_parent_id(sqlite3 *db, int obj_id) { DBG();
+obj_id_t mud_get_parent_id(sqlite3 *db, obj_id_t obj_id) { DBG();
     sqlite3_stmt *stmt = NULL;
 
     if(sqlite3_prepare_v3(db, "select par_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
@@ -216,7 +221,34 @@ int mud_get_parent_id(sqlite3 *db, int obj_id) { DBG();
             sqlite3_finalize(stmt);
             return 0;
         case SQLITE_ROW: {
-            int par_id = sqlite3_column_int(stmt, 1);
+            obj_id_t par_id = sqlite3_column_int(stmt, 1);
+            sqlite3_finalize(stmt);
+            return par_id;
+        }
+        default:
+            sqlite3_finalize(stmt);
+            return 0;
+    }
+}
+
+/* returns 0 on failure, otherwise returns object id */
+obj_id_t mud_get_location_id(sqlite3 *db, obj_id_t obj_id) { DBG();
+    sqlite3_stmt *stmt = NULL;
+
+    if(sqlite3_prepare_v3(db, "select loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return !sql_err("Unable to prepare query.");
+
+    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return !sql_err("Unable to bind ID.");
+    }
+
+    switch(sqlite3_step(stmt)) {
+        case SQLITE_DONE:
+            sqlite3_finalize(stmt);
+            return 0;
+        case SQLITE_ROW: {
+            obj_id_t par_id = sqlite3_column_int(stmt, 1);
             sqlite3_finalize(stmt);
             return par_id;
         }
@@ -373,8 +405,8 @@ int load_mud_obj(lua_State *lua_state, connection_t *connection, int obj_id) { D
 
     push_mud_obj(lua_state,
         obj_id,
-        sqlite3_column_int(stmt, 1),
-        sqlite3_column_int(stmt, 2)
+        sqlite3_column_int(stmt, 0),
+        sqlite3_column_int(stmt, 1)
     );
 
     sqlite3_finalize(stmt);
@@ -541,10 +573,20 @@ const char *pgm_reader(lua_State *lua_state, void *data, size_t *size) { DBG();
 
 int lua_print(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
-    if (lua_gettop(lua_state) < 1) return 1;
+    if (lua_gettop(lua_state) < 1 || !lua_isstring(lua_state, 1)) return 1; // TODO: error handling
     const char *msg = lua_tostring(lua_state, 1);
     SSL_write(connection->ssl, msg, strlen(msg));
     lua_pop(lua_state, 1);
+    return 1;
+}
+
+int lua_location(lua_State *lua_state) { DBG();
+    connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
+    if (lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
+    mud_obj_t *obj = lua_touserdata(lua_state, 1);
+    lua_pop(lua_state, 1);
+    load_mud_obj(lua_state, connection, obj->loc);
+    dumpstack(lua_state, "FOOBAR 1:");
     return 1;
 }
 
@@ -555,6 +597,9 @@ int cmdloop(connection_t *connection) { DBG();
 
     lua_pushcfunction(lua_state, lua_print);
     lua_setglobal(lua_state, "print");
+
+    lua_pushcfunction(lua_state, lua_location);
+    lua_setglobal(lua_state, "location");
 
     while(1) {
         size_t readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf) - 1);
