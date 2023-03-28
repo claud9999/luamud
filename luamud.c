@@ -203,59 +203,29 @@ int mud_obj_set(lua_State *lua_state) { DBG();
     return 0;
 }
 
-// TODO: parameterize which field, possibly macro-ize?
-/* returns 0 on failure, otherwise returns object id */
-obj_id_t mud_get_parent_id(sqlite3 *db, obj_id_t obj_id) { DBG();
+int get_mud_obj(sqlite3 *db, mud_obj_t *objptr, int obj_id) { DBG();
     sqlite3_stmt *stmt = NULL;
 
-    if(sqlite3_prepare_v3(db, "select par_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
-        return !sql_err("Unable to prepare query.");
+    if(sqlite3_prepare_v3(db, "select par_id, loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+        return sql_err("Unable to prepare query.");
 
     if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
         sqlite3_finalize(stmt);
-        return !sql_err("Unable to bind ID.");
+        return sql_err("Unable to bind ID.");
     }
 
-    switch(sqlite3_step(stmt)) {
-        case SQLITE_DONE:
-            sqlite3_finalize(stmt);
-            return 0;
-        case SQLITE_ROW: {
-            obj_id_t par_id = sqlite3_column_int(stmt, 1);
-            sqlite3_finalize(stmt);
-            return par_id;
-        }
-        default:
-            sqlite3_finalize(stmt);
-            return 0;
-    }
-}
-
-/* returns 0 on failure, otherwise returns object id */
-obj_id_t mud_get_location_id(sqlite3 *db, obj_id_t obj_id) { DBG();
-    sqlite3_stmt *stmt = NULL;
-
-    if(sqlite3_prepare_v3(db, "select loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
-        return !sql_err("Unable to prepare query.");
-
-    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
+    if(sqlite3_step(stmt) != SQLITE_ROW) {
         sqlite3_finalize(stmt);
-        return !sql_err("Unable to bind ID.");
+        return sql_err("Invalid object ID.");
     }
 
-    switch(sqlite3_step(stmt)) {
-        case SQLITE_DONE:
-            sqlite3_finalize(stmt);
-            return 0;
-        case SQLITE_ROW: {
-            obj_id_t par_id = sqlite3_column_int(stmt, 1);
-            sqlite3_finalize(stmt);
-            return par_id;
-        }
-        default:
-            sqlite3_finalize(stmt);
-            return 0;
-    }
+    objptr->id = obj_id;
+    objptr->par = sqlite3_column_int(stmt, 0);
+    objptr->loc = sqlite3_column_int(stmt, 1);
+
+    sqlite3_finalize(stmt);
+
+    return 0;
 }
 
 /* returns 0 when it finds the property */
@@ -278,9 +248,14 @@ int mud_obj_get_recurse(lua_State *lua_state, sqlite3 *db, int obj_id, const cha
     }
 
     switch(sqlite3_step(stmt)) {
-        case SQLITE_DONE:
+        case SQLITE_DONE: {
             sqlite3_finalize(stmt);
-            return mud_obj_get_recurse(lua_state, db, mud_get_parent_id(db, obj_id), name);
+            mud_obj_t obj = {};
+            if(get_mud_obj(db, &obj, obj_id) == 0) {
+                return mud_obj_get_recurse(lua_state, db, obj.id, name);
+            }
+            return 0;
+        }
         case SQLITE_ROW: {
             int proptype = sqlite3_column_int(stmt, 0);
             switch(proptype) {
@@ -335,13 +310,10 @@ int mud_obj_get(lua_State *lua_state) { DBG();
     return !mud_obj_get_recurse(lua_state, connection->db, obj->id, propname);
 }
 
-int push_mud_obj(lua_State *lua_state, int id, int par_id, int loc_id) { DBG();
+int push_mud_obj(lua_State *lua_state, mud_obj_t *obj) { DBG();
     mud_obj_t *mud_obj = malloc(sizeof(*mud_obj));
-    memset(mud_obj, 0, sizeof(*mud_obj));
+    memcpy(mud_obj, obj, sizeof(*mud_obj));
     mud_obj->marker = MUD_MARKER;
-    mud_obj->id = id;
-    mud_obj->par = par_id;
-    mud_obj->loc = loc_id;
 
     lua_pushlightuserdata(lua_state, mud_obj);
     lua_createtable(lua_state, 0, 1); /* narr, nrec */
@@ -384,33 +356,14 @@ int create_mud_obj(lua_State *lua_state, connection_t *connection) { DBG();
 
     sqlite3_finalize(stmt);
 
-    return push_mud_obj(lua_state, id, 0, 0);
+    mud_obj_t obj = { .id = id, .par = 0, .loc = 0 };
+    return push_mud_obj(lua_state, &obj);
 }
 
 int load_mud_obj(lua_State *lua_state, connection_t *connection, int obj_id) { DBG();
-    sqlite3_stmt *stmt = NULL;
+    mud_obj_t obj = {0};
 
-    if(sqlite3_prepare_v3(connection->db, "select par_id, loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
-        return mud_err(lua_state, "Unable to prepare query.");
-
-    if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Unable to bind ID.");
-    }
-
-    if(sqlite3_step(stmt) != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
-        return mud_err(lua_state, "Invalid object ID.");
-    }
-
-    push_mud_obj(lua_state,
-        obj_id,
-        sqlite3_column_int(stmt, 0),
-        sqlite3_column_int(stmt, 1)
-    );
-
-    sqlite3_finalize(stmt);
-
+    if(get_mud_obj(connection->db, &obj, obj_id) == 0) push_mud_obj(lua_state, &obj);
     return 1;
 }
 

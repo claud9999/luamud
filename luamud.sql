@@ -28,5 +28,7 @@ create table mud_auth(
 );
 
 insert into mud_obj(id, par_id, loc_id, own_id) values(1, 0, 0, 0);
-insert into mud_prop(obj_id, name, type, val) values(1, "name", 4, "root");
-insert into mud_auth(obj_id, admin, connected, username, password, password_salt) values(1, 1, 1, "root", "cP7ir/uzzBbZ8j3SUKElp5dobgs=", "1234");
+insert into mud_obj(id, par_id, loc_id, own_id) values(2, 0, 0, 0);
+insert into mud_prop(obj_id, name, type, val) values(1, "name", 4, "root's home");
+insert into mud_prop(obj_id, name, type, val) values(2, "name", 4, "root");
+insert into mud_auth(obj_id, admin, connected, username, password, password_salt) values(2, 1, 1, "root", "cP7ir/uzzBbZ8j3SUKElp5dobgs=", "1234");
