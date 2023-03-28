@@ -1,4 +1,4 @@
-#!/bin/bash -ex
+#!/bin/bash -e
 
 salt=`openssl rand -hex 4`
 echo -n "user: "

@@ -19,13 +19,22 @@
 
 char inbuf[1024];
 
-typedef struct {
-    sqlite3 *db;
-} luamud_t;
+typedef enum {
+    SERVER_RUNNING,
+    SERVER_SHUTDOWN
+} server_state_t;
+
+server_state_t server_state = SERVER_RUNNING;
 
 typedef struct {
     int marker, id, par, loc, own;
 } mud_obj_t;
+
+typedef struct {
+    SSL *ssl;
+    int clientsocket, obj_id;
+    sqlite3 *db;
+} connection_t;
 
 static void dumpstack (lua_State *L, const char *pfx) {
   int top=lua_gettop(L);
@@ -91,7 +100,7 @@ const char *mud_prop_fnreader(lua_State *lua_state, void *data, size_t *sz) { DB
 
 /* (obj name val - ) returns 0 on success */
 int mud_obj_set(lua_State *lua_state) { DBG();
-    luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
+    connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
     mud_obj_t *obj = NULL;
     const char *propname = NULL;
     const char *propval = NULL;
@@ -107,7 +116,7 @@ int mud_obj_set(lua_State *lua_state) { DBG();
 
     if(obj->marker != MUD_MARKER) return mud_err(lua_state, "Invalid object.");
 
-    if(sqlite3_prepare_v3(m->db, "delete from mud_prop where obj_id = ? and name = ?", -1, 0, &stmt, NULL) != SQLITE_OK) return mud_err(lua_state, "Unable to prepare query.");
+    if(sqlite3_prepare_v3(connection->db, "delete from mud_prop where obj_id = ? and name = ?", -1, 0, &stmt, NULL) != SQLITE_OK) return mud_err(lua_state, "Unable to prepare query.");
 
     if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
         sqlite3_finalize(stmt);
@@ -131,7 +140,7 @@ int mud_obj_set(lua_State *lua_state) { DBG();
         return 1;
     }
 
-    if(sqlite3_prepare_v3(m->db, "insert into mud_prop(obj_id, name, type, val) values (?, ?, ?, ?)", -1, 0, &stmt, NULL) != SQLITE_OK)
+    if(sqlite3_prepare_v3(connection->db, "insert into mud_prop(obj_id, name, type, val) values (?, ?, ?, ?)", -1, 0, &stmt, NULL) != SQLITE_OK)
         return sql_err("Unable to prepare query.");
 
     if(sqlite3_bind_int(stmt, 1, obj->id) != SQLITE_OK) {
@@ -164,7 +173,9 @@ int mud_obj_set(lua_State *lua_state) { DBG();
         case LUA_TFUNCTION: {
             uint8_t buf[1024]; // do we want dynamic?
             mud_prop_fnbuf_t b = {
-                .buf = buf, .pos = 0, .sz = sizeof(buf)
+                .buf = buf,
+                .sz = sizeof(buf),
+                .pos = 0
             };
 
             lua_dump(lua_state, mud_prop_fnwriter, &b, 0);
@@ -192,7 +203,7 @@ int mud_obj_set(lua_State *lua_state) { DBG();
 int mud_get_parent_id(sqlite3 *db, int obj_id) { DBG();
     sqlite3_stmt *stmt = NULL;
 
-    if(sqlite3_prepare_v3(db, "select par_id from mud_obj where obj_id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+    if(sqlite3_prepare_v3(db, "select par_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
         return !sql_err("Unable to prepare query.");
 
     if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
@@ -277,7 +288,7 @@ int mud_obj_get_recurse(lua_State *lua_state, sqlite3 *db, int obj_id, const cha
 }
 
 int mud_obj_get(lua_State *lua_state) { DBG();
-    luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
+    connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
     mud_obj_t *obj = NULL;
     const char *propname = NULL;
     sqlite3_stmt *stmt = NULL;
@@ -289,7 +300,7 @@ int mud_obj_get(lua_State *lua_state) { DBG();
 
     if (obj->marker != MUD_MARKER) return mud_err(lua_state, "Invalid object.");
 
-    return !mud_obj_get_recurse(lua_state, m->db, obj->id, propname);
+    return !mud_obj_get_recurse(lua_state, connection->db, obj->id, propname);
 }
 
 int push_mud_obj(lua_State *lua_state, int id, int par_id, int loc_id) { DBG();
@@ -316,11 +327,11 @@ int push_mud_obj(lua_State *lua_state, int id, int par_id, int loc_id) { DBG();
     return 1;
 }
 
-int create_mud_obj(lua_State *lua_state, luamud_t *m) { DBG();
+int create_mud_obj(lua_State *lua_state, connection_t *connection) { DBG();
     sqlite3_stmt *stmt = NULL;
     int id = 0;
 
-    if(sqlite3_prepare_v3(m->db, "insert into mud_obj(par_id, loc_id, own_id) values(0, 0, 0)", -1, 0, &stmt, NULL) != SQLITE_OK)
+    if(sqlite3_prepare_v3(connection->db, "insert into mud_obj(par_id, loc_id, own_id) values(0, 0, 0)", -1, 0, &stmt, NULL) != SQLITE_OK)
         return mud_err(lua_state, "Unable to prepare insert.");
 
     if(sqlite3_step(stmt) != SQLITE_DONE) {
@@ -329,7 +340,7 @@ int create_mud_obj(lua_State *lua_state, luamud_t *m) { DBG();
     }
     sqlite3_finalize(stmt);
 
-    if(sqlite3_prepare_v3(m->db, "select last_insert_rowid()", -1, 0, &stmt, NULL) != SQLITE_OK)
+    if(sqlite3_prepare_v3(connection->db, "select last_insert_rowid()", -1, 0, &stmt, NULL) != SQLITE_OK)
         return mud_err(lua_state, "Unable to prepare query.");
 
     if(sqlite3_step(stmt) != SQLITE_ROW) {
@@ -344,10 +355,10 @@ int create_mud_obj(lua_State *lua_state, luamud_t *m) { DBG();
     return push_mud_obj(lua_state, id, 0, 0);
 }
 
-int load_mud_obj(lua_State *lua_state, luamud_t *m, int obj_id) { DBG();
+int load_mud_obj(lua_State *lua_state, connection_t *connection, int obj_id) { DBG();
     sqlite3_stmt *stmt = NULL;
 
-    if(sqlite3_prepare_v3(m->db, "select par_id, loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
+    if(sqlite3_prepare_v3(connection->db, "select par_id, loc_id from mud_obj where id = ?", -1, 0, &stmt, NULL) != SQLITE_OK)
         return mud_err(lua_state, "Unable to prepare query.");
 
     if(sqlite3_bind_int(stmt, 1, obj_id) != SQLITE_OK) {
@@ -372,7 +383,7 @@ int load_mud_obj(lua_State *lua_state, luamud_t *m, int obj_id) { DBG();
 }
 
 int mud_obj(lua_State *lua_state) { DBG();
-    luamud_t *m = *((luamud_t **)lua_getextraspace(lua_state));
+    connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
     sqlite3_stmt *stmt = NULL;
     int sqlite3_rc = 0;
     int r = 0;
@@ -380,7 +391,7 @@ int mud_obj(lua_State *lua_state) { DBG();
     mud_obj_t *mud_obj = NULL;
 
     if (lua_gettop(lua_state) < 1)
-        return create_mud_obj(lua_state, m);
+        return create_mud_obj(lua_state, connection);
 
     if (!lua_isnumber(lua_state, 1))
         return mud_err(lua_state, "Need object ID");
@@ -388,12 +399,12 @@ int mud_obj(lua_State *lua_state) { DBG();
     obj_id = lua_tointeger(lua_state, 1);
     lua_pop(lua_state, 1);
 
-    return load_mud_obj(lua_state, m, obj_id);
+    return load_mud_obj(lua_state, connection, obj_id);
 }
 
 int main_cont(lua_State *lua_state, int status, lua_KContext ctx) { DBG();
-    luamud_t *m = (luamud_t *)ctx;
-    sqlite3_close(m->db);
+    connection_t *connection = (connection_t *)ctx;
+    sqlite3_close(connection->db);
     return 0;
 }
 
@@ -453,12 +464,6 @@ void configure_context(SSL_CTX *ctx) { DBG();
     }
 }
 
-typedef struct {
-    SSL *ssl;
-    int clientsocket, obj_id;
-    luamud_t *mud;
-} connection_t;
-
 int conn_send(connection_t *connection, const char *fmt, ...) { DBG();
     char buf[1024];
     va_list ap;
@@ -470,7 +475,7 @@ int conn_send(connection_t *connection, const char *fmt, ...) { DBG();
 void command_who(connection_t *connection) { DBG();
     sqlite3_stmt *stmt = NULL;
 
-    if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, username from mud_auth where connected = 1", -1, 0, &stmt, NULL) != SQLITE_OK) {
+    if(sqlite3_prepare_v3(connection->db, "select obj_id, username from mud_auth where connected = 1", -1, 0, &stmt, NULL) != SQLITE_OK) {
         sql_err("Unable to prepare who query.\n");
         return;
     }
@@ -486,7 +491,7 @@ void command_who(connection_t *connection) { DBG();
 void mark_connected(connection_t *connection, bool isconnected) { DBG();
     sqlite3_stmt *stmt = NULL;
 
-    if(sqlite3_prepare_v3(connection->mud->db, "update mud_auth set connected = ? where obj_id = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
+    if(sqlite3_prepare_v3(connection->db, "update mud_auth set connected = ? where obj_id = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
         sql_err("Error: unable to prepare query.\n");
         return;
     }
@@ -508,6 +513,7 @@ void mark_connected(connection_t *connection, bool isconnected) { DBG();
 }
 
 bool str_is(const char *a, const char *b) {
+    if(!a || !b) return false;
     if(strlen(a) != strlen(b)) return false;
     return strcmp(a, b) == 0;
 }
@@ -524,32 +530,31 @@ const char *pgm_reader(lua_State *lua_state, void *data, size_t *size) { DBG();
     if(r->state == 0) {
         SSL_write(r->ssl, ". to end\n", 9);
         r->state = 1;
-        *size = strlen(r->buf);
-        return r->buf;
-    }
-    if (r->state == 2) {
-        *size = 0;
-        return NULL;
     }
     SSL_write(r->ssl, ">> ", 3);
     *size = SSL_read(r->ssl, r->buf, r->buf_len - 1);
     r->buf[*size] = '\0';
-    if (str_is(r->buf, ".\n")) {
-        r->state = 2;
-        strcpy(r->buf, "end\n");
-        *size = strlen(r->buf);
-        return r->buf;
-    }
+    if (str_is(r->buf, ".\n")) { *size = 0; }
     if(!*size) return NULL;
     return r->buf;
+}
+
+int lua_print(lua_State *lua_state) { DBG();
+    connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
+    if (lua_gettop(lua_state) < 1) return 1;
+    const char *msg = lua_tostring(lua_state, 1);
+    SSL_write(connection->ssl, msg, strlen(msg));
+    lua_pop(lua_state, 1);
+    return 1;
 }
 
 int cmdloop(connection_t *connection) { DBG();
     lua_State *lua_state = luaL_newstate();
     void **es = (void **)lua_getextraspace(lua_state);
-    *es = connection->mud;
+    *es = connection;
 
-    luaL_openlibs(lua_state);
+    lua_pushcfunction(lua_state, lua_print);
+    lua_setglobal(lua_state, "print");
 
     while(1) {
         size_t readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf) - 1);
@@ -558,15 +563,17 @@ int cmdloop(connection_t *connection) { DBG();
 
         char *tok_sav = NULL;
         const char *cmd = strtok_r(inbuf, " \n", &tok_sav);
+        if(!cmd) continue;
 
         if(str_is(cmd, "@quit")) break;
+        if(str_is(cmd, "@shutdown")) break;
         if(str_is(cmd, "@who")) { command_who(connection); continue; }
         if(str_is(cmd, "@pgm")) {
             int obj_id = atoi(strtok_r(NULL, " \n", &tok_sav));
-            load_mud_obj(lua_state, connection->mud, obj_id);
+            load_mud_obj(lua_state, connection, obj_id);
             char *method_name = strdup(strtok_r(NULL, " \n", &tok_sav));
             lua_pushstring(lua_state, method_name);
-            snprintf(inbuf, sizeof(inbuf) - 1, "function %s()\n", method_name);
+            memset(inbuf, 0, sizeof(inbuf));
             pgm_reader_t r = {
                 .buf = inbuf,
                 .buf_len = sizeof(inbuf),
@@ -582,10 +589,10 @@ int cmdloop(connection_t *connection) { DBG();
             continue;
         }
 
-        load_mud_obj(lua_state, connection->mud, connection->obj_id);
+        load_mud_obj(lua_state, connection, connection->obj_id);
         lua_pushstring(lua_state, inbuf); // TODO tokenize
-
         mud_obj_get(lua_state);
+
         if(lua_isinteger(lua_state, 1)) {
             conn_send(connection, "%d\n", lua_tointeger(lua_state, 1));
             lua_pop(lua_state, 1);
@@ -595,8 +602,9 @@ int cmdloop(connection_t *connection) { DBG();
             lua_pop(lua_state, 1);
         }
         else if(lua_isfunction(lua_state, 1)) {
-            dumpstack(lua_state, "");
-            lua_call(lua_state, 0, 0);
+            load_mud_obj(lua_state, connection, connection->obj_id);
+            lua_setglobal(lua_state, "self");
+            lua_pcall(lua_state, 0, 0, 0);
         }
     }
     lua_close(lua_state);
@@ -621,7 +629,7 @@ void *connected(void *arg) { DBG();
         if(regexec(&preg, inbuf, 3, matches, 0) == 0) {
             char *username = inbuf + matches[1].rm_so; inbuf[matches[1].rm_eo] = '\0';
 
-            if(sqlite3_prepare_v3(connection->mud->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
+            if(sqlite3_prepare_v3(connection->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
                 sql_err("Error: unable to prepare query.\n");
                 return NULL;
             }
@@ -691,11 +699,11 @@ int main(int argc, char **argv) { DBG();
     int rc = 0;
     int srv_sock = 0;
     SSL_CTX *srv_ctx = NULL;
-    luamud_t m;
+    sqlite3 *db = NULL;
 
-    rc = sqlite3_open("luamud.sqlite", &(m.db));
+    rc = sqlite3_open("luamud.sqlite", &(db));
     if (rc) {
-        sql_err("Can't open database '%s': %s\n", "luamud.sqlite", sqlite3_errmsg(m.db));
+        sql_err("Can't open database '%s': %s\n", "luamud.sqlite", sqlite3_errmsg(db));
         return rc;
     }
 
@@ -704,12 +712,13 @@ int main(int argc, char **argv) { DBG();
     configure_context(srv_ctx);
     srv_sock = create_socket(1234);
 
-    while(1) {
+    while(server_state == SERVER_RUNNING) {
         struct sockaddr_in addr;
         unsigned int len = sizeof(addr);
         SSL *ssl = NULL;
 
         int client = accept(srv_sock, (struct sockaddr *)&addr, &len);
+
         if (client < 0) {
             perror("Unable to accept.");
             exit(EXIT_FAILURE);
@@ -725,8 +734,10 @@ int main(int argc, char **argv) { DBG();
             pthread_attr_t ta;
             connection_t *conn_ptr = NULL;
 
-            conn_ptr = malloc(sizeof(*conn_ptr));
-            conn_ptr->ssl = ssl; conn_ptr->clientsocket = client; conn_ptr->mud = &m;
+            conn_ptr = calloc(sizeof(*conn_ptr), 1);
+            conn_ptr->ssl = ssl;
+            conn_ptr->clientsocket = client;
+            conn_ptr->db = db;
 
             pthread_attr_init(&ta);
             pthread_attr_setdetachstate(&ta, PTHREAD_CREATE_DETACHED);
@@ -736,4 +747,5 @@ int main(int argc, char **argv) { DBG();
 
     close(srv_sock);
     SSL_CTX_free(srv_ctx);
+    sqlite3_close(db);
 }
