@@ -230,7 +230,10 @@ int get_mud_obj(sqlite3 *db, mud_obj_t *objptr, int obj_id) { DBG();
 
 /* returns 0 when it finds the property */
 int mud_obj_get_recurse(lua_State *lua_state, sqlite3 *db, int obj_id, const char *name) { DBG();
-    if (!obj_id) return 1;
+    if (!obj_id) {
+        lua_pushnil(lua_state);
+        return 1;
+    }
 
     sqlite3_stmt *stmt = NULL;
 
@@ -252,7 +255,7 @@ int mud_obj_get_recurse(lua_State *lua_state, sqlite3 *db, int obj_id, const cha
             sqlite3_finalize(stmt);
             mud_obj_t obj = {};
             if(get_mud_obj(db, &obj, obj_id) == 0) {
-                return mud_obj_get_recurse(lua_state, db, obj.id, name);
+                return mud_obj_get_recurse(lua_state, db, obj.par, name);
             }
             return 0;
         }
@@ -539,7 +542,15 @@ int lua_location(lua_State *lua_state) { DBG();
     mud_obj_t *obj = lua_touserdata(lua_state, 1);
     lua_pop(lua_state, 1);
     load_mud_obj(lua_state, connection, obj->loc);
-    dumpstack(lua_state, "FOOBAR 1:");
+    return 1;
+}
+
+int lua_owner(lua_State *lua_state) { DBG();
+    connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
+    if (lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
+    mud_obj_t *obj = lua_touserdata(lua_state, 1);
+    lua_pop(lua_state, 1);
+    load_mud_obj(lua_state, connection, obj->own);
     return 1;
 }
 
@@ -554,19 +565,24 @@ int cmdloop(connection_t *connection) { DBG();
     lua_pushcfunction(lua_state, lua_location);
     lua_setglobal(lua_state, "location");
 
+    lua_pushcfunction(lua_state, lua_owner);
+    lua_setglobal(lua_state, "owner");
+
     while(1) {
+        lua_settop(lua_state, 0);
+
         size_t readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf) - 1);
         if (readbytes <= 0) break;
         inbuf[readbytes] = '\0';
 
         char *tok_sav = NULL;
-        const char *cmd = strtok_r(inbuf, " \n", &tok_sav);
-        if(!cmd) continue;
+        const char *tok = strtok_r(inbuf, " \n", &tok_sav);
+        if(!tok) continue;
 
-        if(str_is(cmd, "@quit")) break;
-        if(str_is(cmd, "@shutdown")) break;
-        if(str_is(cmd, "@who")) { command_who(connection); continue; }
-        if(str_is(cmd, "@pgm")) {
+        if(str_is(tok, "@quit")) break;
+        if(str_is(tok, "@shutdown")) break;
+        if(str_is(tok, "@who")) { command_who(connection); continue; }
+        if(str_is(tok, "@pgm")) {
             int obj_id = atoi(strtok_r(NULL, " \n", &tok_sav));
             load_mud_obj(lua_state, connection, obj_id);
             char *method_name = strdup(strtok_r(NULL, " \n", &tok_sav));
@@ -580,7 +596,6 @@ int cmdloop(connection_t *connection) { DBG();
             };
             if (obj_id || method_name) {
                 lua_load(lua_state, pgm_reader, &r, method_name, "t");
-                dumpstack(lua_state, "");
             }
             mud_obj_set(lua_state);
             free(method_name);
@@ -591,19 +606,18 @@ int cmdloop(connection_t *connection) { DBG();
         lua_pushstring(lua_state, inbuf); // TODO tokenize
         mud_obj_get(lua_state);
 
-        if(lua_isinteger(lua_state, 1)) {
-            conn_send(connection, "%d\n", lua_tointeger(lua_state, 1));
-            lua_pop(lua_state, 1);
+        if(!lua_isfunction(lua_state, 1)) continue;
+
+        int tokcnt = 0;
+        // push all the addl parameters
+        while ((tok = strtok_r(NULL, " \n", &tok_sav))) {
+            lua_pushstring(lua_state, tok);
+            tokcnt++;
         }
-        else if(lua_isstring(lua_state, 1)) {
-            conn_send(connection, "%s\n", lua_tostring(lua_state, 1));
-            lua_pop(lua_state, 1);
-        }
-        else if(lua_isfunction(lua_state, 1)) {
-            load_mud_obj(lua_state, connection, connection->obj_id);
-            lua_setglobal(lua_state, "self");
-            lua_pcall(lua_state, 0, 0, 0);
-        }
+
+        load_mud_obj(lua_state, connection, connection->obj_id);
+        lua_setglobal(lua_state, "self");
+        lua_pcall(lua_state, tokcnt, 0, 0);
     }
     lua_close(lua_state);
 
