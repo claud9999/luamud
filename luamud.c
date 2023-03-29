@@ -40,11 +40,11 @@ typedef struct {
     sqlite3 *db;
 } connection_t;
 
-static void dumpstack (lua_State *L, const char *pfx) {
+static void dumpstack(lua_State *L, const char *pfx) {
   int top=lua_gettop(L);
-  for (int i=1; i <= top; i++) {
+  for(int i=1; i <= top; i++) {
     printf("%s%d\t%s\t", pfx, i, luaL_typename(L,i));
-    switch (lua_type(L, i)) {
+    switch(lua_type(L, i)) {
       case LUA_TNUMBER: printf("%g\n",lua_tonumber(L,i)); break;
       case LUA_TSTRING: printf("%s\n",lua_tostring(L,i)); break;
       case LUA_TBOOLEAN: printf("%s\n", (lua_toboolean(L, i) ? "true" : "false")); break;
@@ -139,7 +139,7 @@ int mud_obj_set(lua_State *lua_state) { DBG();
 
     sqlite3_finalize(stmt);
 
-    if (proptype == LUA_TNIL) {
+    if(proptype == LUA_TNIL) {
         lua_pop(lua_state, 3);
         return 1;
     }
@@ -162,7 +162,7 @@ int mud_obj_set(lua_State *lua_state) { DBG();
         return sql_err("Unable to bind proptype.");
     }
 
-    switch (proptype) {
+    switch(proptype) {
         case LUA_TBOOLEAN:
         case LUA_TNUMBER: {
             int propval = lua_tonumber(lua_state, -1);
@@ -230,7 +230,7 @@ int get_mud_obj(sqlite3 *db, mud_obj_t *objptr, int obj_id) { DBG();
 
 /* returns 0 when it finds the property */
 int mud_obj_get_recurse(lua_State *lua_state, sqlite3 *db, int obj_id, const char *name) { DBG();
-    if (!obj_id) {
+    if(!obj_id) {
         lua_pushnil(lua_state);
         return 1;
     }
@@ -308,7 +308,7 @@ int mud_obj_get(lua_State *lua_state) { DBG();
     propname = lua_tostring(lua_state, -1); lua_pop(lua_state, 1);
     obj = lua_touserdata(lua_state, -1); lua_pop(lua_state, 1);
 
-    if (obj->marker != MUD_MARKER) return mud_err(lua_state, "Invalid object.");
+    if(obj->marker != MUD_MARKER) return mud_err(lua_state, "Invalid object.");
 
     return !mud_obj_get_recurse(lua_state, connection->db, obj->id, propname);
 }
@@ -378,10 +378,10 @@ int mud_obj(lua_State *lua_state) { DBG();
     int obj_id = 0;
     mud_obj_t *mud_obj = NULL;
 
-    if (lua_gettop(lua_state) < 1)
+    if(lua_gettop(lua_state) < 1)
         return create_mud_obj(lua_state, connection);
 
-    if (!lua_isnumber(lua_state, 1))
+    if(!lua_isnumber(lua_state, 1))
         return mud_err(lua_state, "Need object ID");
 
     obj_id = lua_tointeger(lua_state, 1);
@@ -405,17 +405,17 @@ int create_socket(int port) { DBG();
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) {
+    if(s < 0) {
         perror("Unable to create socket");
         exit(EXIT_FAILURE);
     }
 
-    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if(bind(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("Unable to bind");
         exit(EXIT_FAILURE);
     }
 
-    if (listen(s, 1) < 0) {
+    if(listen(s, 1) < 0) {
         perror("Unable to listen");
         exit(EXIT_FAILURE);
     }
@@ -430,7 +430,7 @@ SSL_CTX *create_context() { DBG();
     method = TLS_server_method();
 
     ctx = SSL_CTX_new(method);
-    if (!ctx) {
+    if(!ctx) {
         perror("Unable to create SSL context");
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
@@ -441,12 +441,12 @@ SSL_CTX *create_context() { DBG();
 
 void configure_context(SSL_CTX *ctx) { DBG();
    /* Set the key and cert */
-    if (SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) <= 0) {
+    if(SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
 
-    if (SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) <= 0 ) {
+    if(SSL_CTX_use_PrivateKey_file(ctx, "key.pem", SSL_FILETYPE_PEM) <= 0 ) {
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
@@ -471,7 +471,7 @@ void command_who(connection_t *connection) { DBG();
     while(sqlite3_step(stmt) == SQLITE_ROW) {
         int obj_id = sqlite3_column_int(stmt, 0);
         const unsigned char *username = sqlite3_column_text(stmt, 1);
-        if (conn_send(connection, "%d %s\n", obj_id, username) < 0) return;
+        if(conn_send(connection, "%d %s\n", obj_id, username) < 0) return;
     }
     sqlite3_finalize(stmt);
 }
@@ -484,13 +484,13 @@ void mark_connected(connection_t *connection, bool isconnected) { DBG();
         return;
     }
 
-    if (sqlite3_bind_int(stmt, 1, connection->obj_id) != SQLITE_OK) {
+    if(sqlite3_bind_int(stmt, 1, connection->obj_id) != SQLITE_OK) {
         sqlite3_finalize(stmt);
         sql_err("Unable to bind obj id.");
         return;
     }
 
-    if (sqlite3_bind_int(stmt, 2, isconnected ? 1 : 0) != SQLITE_OK) {
+    if(sqlite3_bind_int(stmt, 2, isconnected ? 1 : 0) != SQLITE_OK) {
         sqlite3_finalize(stmt);
         sql_err("Unable to bind connected flag.");
         return;
@@ -510,26 +510,21 @@ typedef struct {
     char *buf;
     size_t buf_len;
     SSL *ssl;
-    int state;
 } pgm_reader_t;
 
 const char *pgm_reader(lua_State *lua_state, void *data, size_t *size) { DBG();
     pgm_reader_t *r = data;
-    if(r->state == 0) {
-        SSL_write(r->ssl, ". to end\n", 9);
-        r->state = 1;
-    }
     SSL_write(r->ssl, ">> ", 3);
     *size = SSL_read(r->ssl, r->buf, r->buf_len - 1);
     r->buf[*size] = '\0';
-    if (str_is(r->buf, ".\n")) { *size = 0; }
+    if(str_is(r->buf, ".\n")) { *size = 0; }
     if(!*size) return NULL;
     return r->buf;
 }
 
 int lua_print(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
-    if (lua_gettop(lua_state) < 1 || !lua_isstring(lua_state, 1)) return 1; // TODO: error handling
+    if(lua_gettop(lua_state) < 1 || !lua_isstring(lua_state, 1)) return 1; // TODO: error handling
     const char *msg = lua_tostring(lua_state, 1);
     SSL_write(connection->ssl, msg, strlen(msg));
     lua_pop(lua_state, 1);
@@ -538,7 +533,7 @@ int lua_print(lua_State *lua_state) { DBG();
 
 int lua_location(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
-    if (lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
+    if(lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
     mud_obj_t *obj = lua_touserdata(lua_state, 1);
     lua_pop(lua_state, 1);
     load_mud_obj(lua_state, connection, obj->loc);
@@ -547,7 +542,7 @@ int lua_location(lua_State *lua_state) { DBG();
 
 int lua_owner(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
-    if (lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
+    if(lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
     mud_obj_t *obj = lua_touserdata(lua_state, 1);
     lua_pop(lua_state, 1);
     load_mud_obj(lua_state, connection, obj->own);
@@ -572,7 +567,7 @@ int cmdloop(connection_t *connection) { DBG();
         lua_settop(lua_state, 0);
 
         size_t readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf) - 1);
-        if (readbytes <= 0) break;
+        if(readbytes <= 0) break;
         inbuf[readbytes] = '\0';
 
         char *tok_sav = NULL;
@@ -582,23 +577,58 @@ int cmdloop(connection_t *connection) { DBG();
         if(str_is(tok, "@quit")) break;
         if(str_is(tok, "@shutdown")) break;
         if(str_is(tok, "@who")) { command_who(connection); continue; }
-        if(str_is(tok, "@pgm")) {
-            int obj_id = atoi(strtok_r(NULL, " \n", &tok_sav));
+        if(str_is(tok, "@set")) {
+            char *obj_id_str = strtok_r(NULL, " \n", &tok_sav);
+            if(!obj_id_str) continue;
+            int obj_id = atoi(obj_id_str);
+            if(!obj_id) continue;
+            char *propname = strdup(strtok_r(NULL, " \n", &tok_sav));
+            if(!propname) continue;
+
+            inbuf[0] = '\0';
+            size_t sz = 0, addsz = 0;
+            SSL_write(connection->ssl, ". to end\n", 9);
+            do {
+                SSL_write(connection->ssl, ">> ", 3);
+                addsz = SSL_read(connection->ssl, inbuf + sz, sizeof(inbuf) - sz - 1);
+                inbuf[sz + addsz] = '\0';
+                if(str_is(inbuf + sz, ".\n")) {
+                    inbuf[sz] = '\0';
+                    break;
+                }
+                sz += addsz;
+            } while (sz < sizeof(inbuf) - 1);
+
+printf("FOOBAR: %d %s = %s", obj_id, propname, inbuf);
             load_mud_obj(lua_state, connection, obj_id);
-            char *method_name = strdup(strtok_r(NULL, " \n", &tok_sav));
-            lua_pushstring(lua_state, method_name);
+            lua_pushstring(lua_state, propname);
+            lua_pushstring(lua_state, inbuf);
+            mud_obj_set(lua_state);
+            free(propname);
+            continue;
+        }
+
+        if(str_is(tok, "@pgm")) {
+            char *obj_id_str = strtok_r(NULL, " \n", &tok_sav);
+            if(!obj_id_str) continue;
+            int obj_id = atoi(obj_id_str);
+            if(!obj_id) continue;
+            char *propname = strdup(strtok_r(NULL, " \n", &tok_sav));
+            if(!propname) continue;
+
+            load_mud_obj(lua_state, connection, obj_id);
+            lua_pushstring(lua_state, propname);
             memset(inbuf, 0, sizeof(inbuf));
             pgm_reader_t r = {
                 .buf = inbuf,
                 .buf_len = sizeof(inbuf),
-                .ssl = connection->ssl,
-                .state = 0
+                .ssl = connection->ssl
             };
-            if (obj_id || method_name) {
-                lua_load(lua_state, pgm_reader, &r, method_name, "t");
-            }
+            SSL_write(connection->ssl, ". to end\n", 9);
+            lua_load(lua_state, pgm_reader, &r, propname, "t");
             mud_obj_set(lua_state);
-            free(method_name);
+
+            free(propname);
             continue;
         }
 
@@ -610,7 +640,7 @@ int cmdloop(connection_t *connection) { DBG();
 
         int tokcnt = 0;
         // push all the addl parameters
-        while ((tok = strtok_r(NULL, " \n", &tok_sav))) {
+        while((tok = strtok_r(NULL, " \n", &tok_sav))) {
             lua_pushstring(lua_state, tok);
             tokcnt++;
         }
@@ -633,10 +663,10 @@ void *connected(void *arg) { DBG();
     regmatch_t matches[3];
     regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
     while(!connection->obj_id) { /* unauthenticated */
-        if (conn_send(connection, "Connect: ") < 0) return NULL;
+        if(conn_send(connection, "Connect: ") < 0) return NULL;
 
         readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf));
-        if (readbytes <= 0) break;
+        if(readbytes <= 0) break;
         inbuf[readbytes - 1] = '\0'; /* remove EOL, or mark end of buf */
         if(regexec(&preg, inbuf, 3, matches, 0) == 0) {
             char *username = inbuf + matches[1].rm_so; inbuf[matches[1].rm_eo] = '\0';
@@ -646,7 +676,7 @@ void *connected(void *arg) { DBG();
                 return NULL;
             }
 
-            if (sqlite3_bind_text(stmt, 1, username, -1, NULL) != SQLITE_OK) {
+            if(sqlite3_bind_text(stmt, 1, username, -1, NULL) != SQLITE_OK) {
                 sqlite3_finalize(stmt);
                 sql_err("Unable to bind user/pass.");
                 return NULL;
@@ -684,14 +714,14 @@ void *connected(void *arg) { DBG();
 
             EVP_cleanup();
 
-            if (strcmp((const char *)password, (const char *)md_value)) {
-                if (conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
+            if(strcmp((const char *)password, (const char *)md_value)) {
+                if(conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
                 continue;
             }
 
             sqlite3_finalize(stmt);
 
-            if (conn_send(connection, "Connected, obj_id=%d.\n", obj_id) < 0) return NULL;
+            if(conn_send(connection, "Connected, obj_id=%d.\n", obj_id) < 0) return NULL;
             connection->obj_id = obj_id;
             mark_connected(connection, true);
         }
@@ -714,7 +744,7 @@ int main(int argc, char **argv) { DBG();
     sqlite3 *db = NULL;
 
     rc = sqlite3_open("luamud.sqlite", &(db));
-    if (rc) {
+    if(rc) {
         sql_err("Can't open database '%s': %s\n", "luamud.sqlite", sqlite3_errmsg(db));
         return rc;
     }
@@ -731,7 +761,7 @@ int main(int argc, char **argv) { DBG();
 
         int client = accept(srv_sock, (struct sockaddr *)&addr, &len);
 
-        if (client < 0) {
+        if(client < 0) {
             perror("Unable to accept.");
             exit(EXIT_FAILURE);
         }
@@ -739,7 +769,7 @@ int main(int argc, char **argv) { DBG();
         ssl = SSL_new(srv_ctx);
         SSL_set_fd(ssl, client);
 
-        if (SSL_accept(ssl) <= 0) {
+        if(SSL_accept(ssl) <= 0) {
             ERR_print_errors_fp(stderr);
         } else {
             pthread_t t;
