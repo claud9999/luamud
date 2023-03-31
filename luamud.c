@@ -17,8 +17,6 @@
 
 #define MUD_MARKER 0xBEADDEEF
 
-char inbuf[1024];
-
 typedef int obj_id_t;
 
 typedef enum {
@@ -33,11 +31,25 @@ typedef struct {
     obj_id_t id, par, loc, own;
 } mud_obj_t;
 
+typedef enum {
+    STATE_UNAUTH,
+    STATE_CMD,
+    STATE_PGM_INPUT,
+    STATE_SET_INPUT,
+    STATE_END
+} cmdloop_state_t;
+
 typedef struct {
-    SSL *ssl;
+    char buf[1024];
     int clientsocket;
-    obj_id_t obj_id;
+    SSL *ssl;
     sqlite3 *db;
+    lua_State *lua_state;
+    cmdloop_state_t state;
+    obj_id_t user_obj_id, prop_obj_id;
+    char *propname;
+    char *propval;
+    size_t sz;
 } connection_t;
 
 static void dumpstack(lua_State *L, const char *pfx) {
@@ -107,7 +119,6 @@ int mud_obj_set(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
     mud_obj_t *obj = NULL;
     const char *propname = NULL;
-    const char *propval = NULL;
     sqlite3_stmt *stmt = NULL;
     int sqlite3_rc = 0;
     int proptype = 0;
@@ -363,10 +374,10 @@ int create_mud_obj(lua_State *lua_state, connection_t *connection) { DBG();
     return push_mud_obj(lua_state, &obj);
 }
 
-int load_mud_obj(lua_State *lua_state, connection_t *connection, int obj_id) { DBG();
+int load_mud_obj(connection_t *connection, int obj_id) { DBG();
     mud_obj_t obj = {0};
 
-    if(get_mud_obj(connection->db, &obj, obj_id) == 0) push_mud_obj(lua_state, &obj);
+    if(get_mud_obj(connection->db, &obj, obj_id) == 0) push_mud_obj(connection->lua_state, &obj);
     return 1;
 }
 
@@ -387,7 +398,7 @@ int mud_obj(lua_State *lua_state) { DBG();
     obj_id = lua_tointeger(lua_state, 1);
     lua_pop(lua_state, 1);
 
-    return load_mud_obj(lua_state, connection, obj_id);
+    return load_mud_obj(connection, obj_id);
 }
 
 int main_cont(lua_State *lua_state, int status, lua_KContext ctx) { DBG();
@@ -484,7 +495,7 @@ void mark_connected(connection_t *connection, bool isconnected) { DBG();
         return;
     }
 
-    if(sqlite3_bind_int(stmt, 1, connection->obj_id) != SQLITE_OK) {
+    if(sqlite3_bind_int(stmt, 1, connection->user_obj_id) != SQLITE_OK) {
         sqlite3_finalize(stmt);
         sql_err("Unable to bind obj id.");
         return;
@@ -506,22 +517,6 @@ bool str_is(const char *a, const char *b) {
     return strcmp(a, b) == 0;
 }
 
-typedef struct {
-    char *buf;
-    size_t buf_len;
-    SSL *ssl;
-} pgm_reader_t;
-
-const char *pgm_reader(lua_State *lua_state, void *data, size_t *size) { DBG();
-    pgm_reader_t *r = data;
-    SSL_write(r->ssl, ">> ", 3);
-    *size = SSL_read(r->ssl, r->buf, r->buf_len - 1);
-    r->buf[*size] = '\0';
-    if(str_is(r->buf, ".\n")) { *size = 0; }
-    if(!*size) return NULL;
-    return r->buf;
-}
-
 int lua_print(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
     if(lua_gettop(lua_state) < 1 || !lua_isstring(lua_state, 1)) return 1; // TODO: error handling
@@ -534,9 +529,10 @@ int lua_print(lua_State *lua_state) { DBG();
 int lua_location(lua_State *lua_state) { DBG();
     connection_t *connection = *((connection_t **)lua_getextraspace(lua_state));
     if(lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
+    dumpstack(lua_state, "LOC");
     mud_obj_t *obj = lua_touserdata(lua_state, 1);
     lua_pop(lua_state, 1);
-    load_mud_obj(lua_state, connection, obj->loc);
+    load_mud_obj(connection, obj->loc);
     return 1;
 }
 
@@ -545,188 +541,202 @@ int lua_owner(lua_State *lua_state) { DBG();
     if(lua_gettop(lua_state) != 1 || !lua_isuserdata(lua_state, 1)) return 1; // TODO: error handling
     mud_obj_t *obj = lua_touserdata(lua_state, 1);
     lua_pop(lua_state, 1);
-    load_mud_obj(lua_state, connection, obj->own);
+    load_mud_obj(connection, obj->own);
     return 1;
 }
 
-int cmdloop(connection_t *connection) { DBG();
-    lua_State *lua_state = luaL_newstate();
-    void **es = (void **)lua_getextraspace(lua_state);
-    *es = connection;
-
-    lua_pushcfunction(lua_state, lua_print);
-    lua_setglobal(lua_state, "print");
-
-    lua_pushcfunction(lua_state, lua_location);
-    lua_setglobal(lua_state, "location");
-
-    lua_pushcfunction(lua_state, lua_owner);
-    lua_setglobal(lua_state, "owner");
-
-    while(1) {
-        lua_settop(lua_state, 0);
-
-        size_t readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf) - 1);
-        if(readbytes <= 0) break;
-        inbuf[readbytes] = '\0';
-
-        char *tok_sav = NULL;
-        const char *tok = strtok_r(inbuf, " \n", &tok_sav);
-        if(!tok) continue;
-
-        if(str_is(tok, "@quit")) break;
-        if(str_is(tok, "@shutdown")) break;
-        if(str_is(tok, "@who")) { command_who(connection); continue; }
-        if(str_is(tok, "@set")) {
-            char *obj_id_str = strtok_r(NULL, " \n", &tok_sav);
-            if(!obj_id_str) continue;
-            int obj_id = atoi(obj_id_str);
-            if(!obj_id) continue;
-            char *propname = strdup(strtok_r(NULL, " \n", &tok_sav));
-            if(!propname) continue;
-
-            inbuf[0] = '\0';
-            size_t sz = 0, addsz = 0;
-            SSL_write(connection->ssl, ". to end\n", 9);
-            do {
-                SSL_write(connection->ssl, ">> ", 3);
-                addsz = SSL_read(connection->ssl, inbuf + sz, sizeof(inbuf) - sz - 1);
-                inbuf[sz + addsz] = '\0';
-                if(str_is(inbuf + sz, ".\n")) {
-                    inbuf[sz] = '\0';
-                    break;
-                }
-                sz += addsz;
-            } while (sz < sizeof(inbuf) - 1);
-
-printf("FOOBAR: %d %s = %s", obj_id, propname, inbuf);
-            load_mud_obj(lua_state, connection, obj_id);
-            lua_pushstring(lua_state, propname);
-            lua_pushstring(lua_state, inbuf);
-            mud_obj_set(lua_state);
-            free(propname);
-            continue;
-        }
-
-        if(str_is(tok, "@pgm")) {
-            char *obj_id_str = strtok_r(NULL, " \n", &tok_sav);
-            if(!obj_id_str) continue;
-            int obj_id = atoi(obj_id_str);
-            if(!obj_id) continue;
-            char *propname = strdup(strtok_r(NULL, " \n", &tok_sav));
-            if(!propname) continue;
-
-            load_mud_obj(lua_state, connection, obj_id);
-            lua_pushstring(lua_state, propname);
-            memset(inbuf, 0, sizeof(inbuf));
-            pgm_reader_t r = {
-                .buf = inbuf,
-                .buf_len = sizeof(inbuf),
-                .ssl = connection->ssl
-            };
-            SSL_write(connection->ssl, ". to end\n", 9);
-            lua_load(lua_state, pgm_reader, &r, propname, "t");
-            mud_obj_set(lua_state);
-
-            free(propname);
-            continue;
-        }
-
-        load_mud_obj(lua_state, connection, connection->obj_id);
-        lua_pushstring(lua_state, inbuf); // TODO tokenize
-        mud_obj_get(lua_state);
-
-        if(!lua_isfunction(lua_state, 1)) continue;
-
-        int tokcnt = 0;
-        // push all the addl parameters
-        while((tok = strtok_r(NULL, " \n", &tok_sav))) {
-            lua_pushstring(lua_state, tok);
-            tokcnt++;
-        }
-
-        load_mud_obj(lua_state, connection, connection->obj_id);
-        lua_setglobal(lua_state, "self");
-        lua_pcall(lua_state, tokcnt, 0, 0);
+const char *pgm_reader(lua_State *lua_state, void *data, size_t *size) { DBG();
+    connection_t *connection = data;
+    if(connection->sz) { // return the entire buf in one shot
+        *size = connection->sz;
+        connection->sz = 0;
+        return connection->propval;
+    } else {
+        *size = 0;
+        return NULL;
     }
-    lua_close(lua_state);
+}
+
+int cmdloop(connection_t *connection) { DBG();
+    while(connection->state != STATE_END) {
+        lua_settop(connection->lua_state, 0);
+
+        size_t readbytes = SSL_read(connection->ssl, connection->buf, sizeof(connection->buf) - 1);
+        if(readbytes <= 0) break;
+        connection->buf[readbytes] = '\0';
+
+        switch(connection->state) {
+            case STATE_UNAUTH: {
+                sqlite3_stmt *stmt = NULL;
+                regex_t preg;
+                regmatch_t matches[3];
+
+                regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
+                if(regexec(&preg, connection->buf, 3, matches, 0) != 0) continue;
+
+                char *username = connection->buf + matches[1].rm_so; connection->buf[matches[1].rm_eo] = '\0';
+
+                if(sqlite3_prepare_v3(connection->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
+                    return sql_err("Error: unable to prepare query.\n");
+                }
+
+                if(sqlite3_bind_text(stmt, 1, username, -1, NULL) != SQLITE_OK) {
+                    sqlite3_finalize(stmt);
+                    return sql_err("Unable to bind user/pass.");
+                } else if(sqlite3_step(stmt) != SQLITE_ROW) {
+                    if(conn_send(connection, "Invalid username/password.\n")) return 1;
+                    sqlite3_finalize(stmt);
+                    continue;
+                }
+
+                int obj_id = sqlite3_column_int(stmt, 0);
+                const unsigned char *password = sqlite3_column_text(stmt, 1), *password_salt = sqlite3_column_text(stmt, 2);
+
+                EVP_MD_CTX *mdctx;
+                const EVP_MD *md;
+                unsigned char md_value[EVP_MAX_MD_SIZE];
+                unsigned int md_len;
+
+                OpenSSL_add_all_digests();
+
+                mdctx = EVP_MD_CTX_create();
+                EVP_DigestInit(mdctx, EVP_sha1());
+                EVP_DigestUpdate(mdctx, password_salt, strlen((const char *)password_salt));
+                EVP_DigestUpdate(mdctx, connection->buf + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so - 1);
+                EVP_DigestFinal(mdctx, md_value, &md_len);
+                EVP_MD_CTX_destroy(mdctx);
+
+                BIO *bio_b64 = BIO_new(BIO_f_base64());
+                BIO *bio_mem = BIO_new(BIO_s_mem());
+                BIO_push(bio_b64, bio_mem);
+                BIO_write(bio_b64, md_value, md_len);
+                BIO_flush(bio_b64);
+                md_len = BIO_read(bio_mem, md_value, sizeof(md_value));
+                md_value[md_len] = '\0';
+                md_value[md_len - 1] = '\0'; // eat CR
+
+                EVP_cleanup();
+
+                if(strcmp((const char *)password, (const char *)md_value)) {
+                    if(conn_send(connection, "Invalid username/password.\n") < 0) return 1;
+                    continue;
+                }
+
+                sqlite3_finalize(stmt);
+
+                if(conn_send(connection, "Connected, obj_id=%d.\n", obj_id) < 0) return 1;
+                connection->user_obj_id = obj_id;
+                mark_connected(connection, true);
+                connection->state = STATE_CMD;
+            }
+            case STATE_CMD: {
+                char *tok_sav = NULL;
+                const char *tok = strtok_r(connection->buf, " \n", &tok_sav);
+                if(!tok) break;
+
+                if(str_is(tok, "@quit")) { connection->state = STATE_END; continue; }
+                if(str_is(tok, "@shutdown")) { connection->state = STATE_END; break; }
+                if(str_is(tok, "@who")) { command_who(connection); continue; }
+                if(str_is(tok, "@pgm")) connection->state = STATE_PGM_INPUT;
+                if(str_is(tok, "@set")) connection->state = STATE_SET_INPUT;
+                if(connection->state == STATE_PGM_INPUT || connection->state == STATE_SET_INPUT) {
+                    char *obj_id_str = strtok_r(NULL, " \n", &tok_sav);
+                    if(!obj_id_str) {
+                        conn_send(connection, "%s obj_id propname\n", tok);
+                        connection->state = STATE_CMD;
+                        continue;
+                    }
+                    connection->prop_obj_id = atoi(obj_id_str);
+                    if(!connection->prop_obj_id) {
+                        conn_send(connection, "%s obj_id propname\n", tok);
+                        connection->state = STATE_CMD;
+                        continue;
+                    }
+                    connection->propname = strdup(strtok_r(NULL, " \n", &tok_sav));
+                    if(!connection->propname) {
+                        conn_send(connection, "%s obj_id propname\n", tok);
+                        connection->state = STATE_CMD;
+                        connection->prop_obj_id = 0;
+                        continue;
+                    }
+                    connection->propval = NULL;
+                    conn_send(connection, ". to end\n");
+                    conn_send(connection, ">> ");
+                    continue;
+                }
+
+                load_mud_obj(connection, connection->user_obj_id);
+                lua_pushstring(connection->lua_state, connection->buf); // TODO tokenize
+                mud_obj_get(connection->lua_state);
+
+                if(!lua_isfunction(connection->lua_state, 1)) continue;
+
+                int tokcnt = 0;
+                // push all the addl parameters
+                while((tok = strtok_r(NULL, " \n", &tok_sav))) {
+                    lua_pushstring(connection->lua_state, tok);
+                    tokcnt++;
+                }
+
+                load_mud_obj(connection, connection->user_obj_id);
+                lua_setglobal(connection->lua_state, "self");
+                lua_pcall(connection->lua_state, tokcnt, 0, 0);
+                continue;
+            }
+            case STATE_PGM_INPUT:
+            case STATE_SET_INPUT:
+                if(str_is(connection->buf, ".\n")) {
+                    connection->propval[--connection->sz] = '\0'; // remove last cr
+                    load_mud_obj(connection, connection->prop_obj_id);
+                    lua_pushstring(connection->lua_state, connection->propname);
+                    if(connection->state == STATE_PGM_INPUT) lua_load(connection->lua_state, pgm_reader, connection, connection->propname, "t");
+                    else lua_pushstring(connection->lua_state, connection->propval);
+                    mud_obj_set(connection->lua_state);
+                    free(connection->propname);
+                    free(connection->propval);
+                    connection->state = STATE_CMD;
+                    continue;
+                }
+
+                size_t addsz = strlen(connection->buf);
+                if (!connection->propval) {
+                    connection->propval = malloc(addsz + 1); // space for '\0'
+                    if(connection->propval) strcpy(connection->propval, connection->buf);
+                } else {
+                    connection->propval = realloc(connection->propval, connection->sz + strlen(connection->buf));
+                    if(connection->propval) strcpy(connection->propval + connection->sz, connection->buf);
+                }
+                connection->sz += addsz;
+
+                conn_send(connection, ">> ");
+                break;
+            default:
+                break;
+        }
+    }
 
     return 0;
 }
 
 void *connected(void *arg) { DBG();
-    connection_t *connection = (connection_t *)arg;
-    sqlite3_stmt *stmt = NULL;
-    size_t readbytes = 0;
+    connection_t *connection = arg;
 
-    regex_t preg;
-    regmatch_t matches[3];
-    regcomp(&preg, "connect ([^ ]*) (.*)", REG_EXTENDED);
-    while(!connection->obj_id) { /* unauthenticated */
-        if(conn_send(connection, "Connect: ") < 0) return NULL;
+    connection->state = STATE_UNAUTH;
 
-        readbytes = SSL_read(connection->ssl, inbuf, sizeof(inbuf));
-        if(readbytes <= 0) break;
-        inbuf[readbytes - 1] = '\0'; /* remove EOL, or mark end of buf */
-        if(regexec(&preg, inbuf, 3, matches, 0) == 0) {
-            char *username = inbuf + matches[1].rm_so; inbuf[matches[1].rm_eo] = '\0';
+    connection->lua_state = luaL_newstate();
+    void **es = (void **)lua_getextraspace(connection->lua_state);
+    *es = connection;
 
-            if(sqlite3_prepare_v3(connection->db, "select obj_id, password, password_salt from mud_auth where username = ?", -1, 0, &stmt, NULL) != SQLITE_OK) {
-                sql_err("Error: unable to prepare query.\n");
-                return NULL;
-            }
+    lua_pushcfunction(connection->lua_state, lua_print);
+    lua_setglobal(connection->lua_state, "print");
 
-            if(sqlite3_bind_text(stmt, 1, username, -1, NULL) != SQLITE_OK) {
-                sqlite3_finalize(stmt);
-                sql_err("Unable to bind user/pass.");
-                return NULL;
-            } else if(sqlite3_step(stmt) != SQLITE_ROW) {
-                if(conn_send(connection, "Invalid username/password.\n")) return NULL;
-                sqlite3_finalize(stmt);
-                continue;
-            }
+    lua_pushcfunction(connection->lua_state, lua_location);
+    lua_setglobal(connection->lua_state, "location");
 
-            int obj_id = sqlite3_column_int(stmt, 0);
-            const unsigned char *password = sqlite3_column_text(stmt, 1), *password_salt = sqlite3_column_text(stmt, 2);
+    lua_pushcfunction(connection->lua_state, lua_owner);
+    lua_setglobal(connection->lua_state, "owner");
 
-            EVP_MD_CTX *mdctx;
-            const EVP_MD *md;
-            unsigned char md_value[EVP_MAX_MD_SIZE];
-            unsigned int md_len;
-
-            OpenSSL_add_all_digests();
-
-            mdctx = EVP_MD_CTX_create();
-            EVP_DigestInit(mdctx, EVP_sha1());
-            EVP_DigestUpdate(mdctx, password_salt, strlen((const char *)password_salt));
-            EVP_DigestUpdate(mdctx, inbuf + matches[2].rm_so, matches[2].rm_eo - matches[2].rm_so);
-            EVP_DigestFinal(mdctx, md_value, &md_len);
-            EVP_MD_CTX_destroy(mdctx);
-
-            BIO *bio_b64 = BIO_new(BIO_f_base64());
-            BIO *bio_mem = BIO_new(BIO_s_mem());
-            BIO_push(bio_b64, bio_mem);
-            BIO_write(bio_b64, md_value, md_len);
-            BIO_flush(bio_b64);
-            md_len = BIO_read(bio_mem, md_value, sizeof(md_value));
-            md_value[md_len] = '\0';
-            md_value[md_len - 1] = '\0'; // eat CR
-
-            EVP_cleanup();
-
-            if(strcmp((const char *)password, (const char *)md_value)) {
-                if(conn_send(connection, "Invalid username/password.\n") < 0) return NULL;
-                continue;
-            }
-
-            sqlite3_finalize(stmt);
-
-            if(conn_send(connection, "Connected, obj_id=%d.\n", obj_id) < 0) return NULL;
-            connection->obj_id = obj_id;
-            mark_connected(connection, true);
-        }
-    }
-
+    mark_connected(connection, true);
     cmdloop(connection);
     mark_connected(connection, false);
 
@@ -734,6 +744,9 @@ void *connected(void *arg) { DBG();
     SSL_free(connection->ssl);
     close(connection->clientsocket);
     free(connection);
+
+    lua_close(connection->lua_state);
+
     return NULL;
 }
 

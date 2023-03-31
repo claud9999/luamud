@@ -48,14 +48,12 @@ While Lua has cooperative multitasking (through continuations), support for pre-
 * Simple in-game editing/tracing/debugging of Lua source.
 * Minimal built-in game verbs.
 * Data-at-rest cryptography? (Need to ensure admins can read/write encrypted data.)
-* NO GNU Readline for command editing, autocompletion, and history.
 
 ## TODO
 
 * Lua memory tracking/limiting.
 * Access control.
 * Recursive SQLite query (?) for property retrieval.
-* GNU Readline and OpenSSL seem incompatible; GNU Readline needs a `FILE *` for input and output. OpenSSL requires calls to `SSL_read()` and `SSL_write()`. Any (reasonable) way around this?
+* GNU Readline and OpenSSL -- use pipe?
 * Move SHA1 to BIO?
-* Evaluate WolfSSL instead of OpenSSL.
 * SQLite BLOB writing API...
