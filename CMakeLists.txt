@@ -11,8 +11,14 @@ add_custom_command(
 
 add_custom_target(luamud_sqlite ALL DEPENDS ${PROJECT_BINARY_DIR}/luamud.sqlite)
 
-include_directories(/usr/include/lua5.4)
-include_directories(../STC/include)
+if (LINUX)
+    include_directories(/usr/include/lua5.4)
+elseif (APPLE)
+    include_directories(/usr/local/include/lua)
+    include_directories(/usr/local/Cellar/openssl@3/3.1.0/include)
+    link_directories(/usr/local/lib)
+    link_directories(/usr/local/Cellar/openssl@3/3.1.0/lib)
+endif()
 
 add_executable(
     luamud
